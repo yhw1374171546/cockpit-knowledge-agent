@@ -1,0 +1,40 @@
+# ══════════════════════════════════════════════════════════════
+#  本仓库只上传「代码」。数据、模型权重、跑批产物、求职材料均不入库。
+# ══════════════════════════════════════════════════════════════
+
+# ── 数据与语料（体积大 / 含第三方版权）──
+data/
+all_text.txt
+benchmark/bench_data.json
+images/
+
+# ── 模型权重与分词器（体积过大，按 README「模型准备」下载）──
+pre_train_model/
+
+# ── 知识库与评测产物（可由 kb/*.py、eval/*.py 重新生成）──
+kb/*.jsonl
+kb/*.json
+eval/*.json
+eval/*.jsonl
+eval/*.md
+
+# ── 求职材料（简历、分析报告、课程原始文档备份）──
+docs/
+
+# ── Python 缓存 ──
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# ── 运行产物 ──
+vector_store/
+model_cache/
+*.log
+
+# ── 系统 / 编辑器 ──
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

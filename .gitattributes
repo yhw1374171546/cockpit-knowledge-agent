@@ -1,0 +1,7 @@
+# 统一换行符：shell 脚本在 Linux/Docker 中执行，必须是 LF，否则报 "bad interpreter"
+* text=auto eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
