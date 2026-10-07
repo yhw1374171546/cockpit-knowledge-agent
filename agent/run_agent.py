@@ -41,6 +41,10 @@ DEMO_QUESTIONS = [
 
 def build_agent(args) -> AgentGraph:
     registry = build_default_registry(args.kb)
+    if getattr(args, "telemetry", "normal") != "normal":
+        # 演示用：切到「严重故障 / 电池过热」车况，触发安全评审介入
+        from agent.tools import TELEMETRY_PROFILES, ToolRegistry
+        registry = ToolRegistry(registry.kb, telemetry=TELEMETRY_PROFILES[args.telemetry])
     reflector = Reflector(evidence_overlap_threshold=args.gate_threshold)
     config = AgentConfig(
         max_steps=args.max_steps,
@@ -89,27 +93,61 @@ def main():
     ap.add_argument("--gate-threshold", type=float, default=0.40,
                     help="证据覆盖率硬门控阈值，0 表示关闭")
     ap.add_argument("--multi-turn", action="store_true", help="使用同一份记忆连续对话")
+    ap.add_argument("--telemetry", choices=["normal", "severe", "overheat"], default="normal",
+                    help="车况场景：normal 轻微胎压报警 / severe 严重亏气+制动故障 / overheat 电池过热")
+    ap.add_argument("--supervisor", action="store_true",
+                    help="用多 Agent（Supervisor + 专家）而非单 Agent 运行")
     ap.add_argument("--langgraph", action="store_true", help="额外演示 LangGraph 编排（需已安装）")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
     agent = build_agent(args)
     questions = args.question or DEMO_QUESTIONS
-
     start = time.perf_counter()
+
+    if args.supervisor:
+        # 多 Agent 模式：Supervisor 拆解 → 专家并行处理 → 冲突仲裁 → 安全评审
+        from agent.orchestrator import Supervisor
+        from agent.obs import Tracer
+        from agent.tools import TELEMETRY_PROFILES
+        sup = Supervisor(agent.registry.kb, tracer=Tracer(),
+                         telemetry=TELEMETRY_PROFILES[args.telemetry])
+        for q in questions:
+            st = sup.run(q)
+            print(f"\n{'=' * 78}")
+            print(f"Q: {q}")
+            print(f"拆解: {st.plan.route} → {[(s.agent, s.kind) for s in st.plan.subtasks]}")
+            for r in st.results:
+                print(f"  · {r.agent:<16} status={r.status:<10} risk={r.risk_level:<8} "
+                      f"confidence={r.confidence:.2f}  {r.answer[:44]}")
+            for c in st.conflicts:
+                print(f"  冲突仲裁: [{c.kind}] {c.participants} → 胜出 {c.winner}"
+                      f"{'（升级人工）' if c.escalated else ''}\n            {c.resolution}")
+            if st.verdict:
+                print(f"  安全评审: {st.verdict.verdict}  {st.verdict.reasons}")
+            print(f"  A: {st.answer[:220]}")
+            if st.citations:
+                print(f"  出处: {' '.join(st.citations[:4])}")
+            print(f"  耗时: total={st.latency_ms.get('total', 0):.1f}ms "
+                  f"(派发 {st.latency_ms.get('dispatch', 0):.1f} / 评审 "
+                  f"{st.latency_ms.get('review', 0):.1f})  tokens={st.tokens_total}")
+        print(f"\n共 {len(questions)} 题，总耗时 {(time.perf_counter() - start):.2f} s")
+        return
+
+    agent_run = agent
     if args.multi_turn:
         for q in questions:
-            print_state(agent.run(q), args.verbose)
+            print_state(agent_run.run(q), args.verbose)
     else:
         for q in questions:
             # 单轮评测：每个问题用独立记忆，避免话题串味
-            agent.memory = ConversationMemory(
+            agent_run.memory = ConversationMemory(
                 window=6, profile=VehicleProfile(model="领克08", mileage_km=23860))
-            print_state(agent.run(q), args.verbose)
+            print_state(agent_run.run(q), args.verbose)
     print(f"\n共 {len(questions)} 题，总耗时 {(time.perf_counter() - start):.2f} s")
 
     if args.langgraph:
-        app = build_langgraph_app(agent)
+        app = build_langgraph_app(agent_run)
         if app is None:
             print("\n[langgraph] 未安装 langgraph，跳过（pip install langgraph 后可用）",
                   file=sys.stderr)

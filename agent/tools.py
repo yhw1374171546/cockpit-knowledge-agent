@@ -98,6 +98,23 @@ VEHICLE_TELEMETRY = {
     "车窗状态": "全部关闭",
 }
 
+# 演示/评测用的车况场景（真实项目里来自车云接口）
+# normal = 轻微胎压报警；severe = 严重亏气 + 制动故障；overheat = 动力电池过热
+TELEMETRY_PROFILES: Dict[str, Dict[str, Any]] = {
+    "normal": VEHICLE_TELEMETRY,
+    "severe": {
+        **VEHICLE_TELEMETRY,
+        "胎压_kPa": {"左前": 236, "右前": 241, "左后": 148, "右后": 239},
+        "告警灯": ["制动系统故障"],
+    },
+    "overheat": {
+        **VEHICLE_TELEMETRY,
+        "胎压告警": [],
+        "告警灯": ["动力电池过热"],
+        "剩余电量_%": 8,
+    },
+}
+
 
 class ToolRegistry:
     """工具注册表：schema 声明、调用、治理（确认/去重/计数/超时）。"""

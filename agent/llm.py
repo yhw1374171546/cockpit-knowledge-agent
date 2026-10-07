@@ -628,7 +628,7 @@ class RuleBasedPlannerLLM(LLMBackend):
     RENDER_PRIORITY = ("胎压告警", "告警灯", "剩余电量_%", "续航_km", "里程_km", "下次保养_km",
                        "本次建议项目", "下次保养", "剩余里程_km", "车型", "纯电续航",
                        "电池容量", "快充时间", "轮胎规格", "胎压_kPa", "车门状态", "车窗状态")
-    RENDER_MAX_CHARS = 240
+    RENDER_MAX_CHARS = 140
 
     @classmethod
     def _render_structured(cls, data: Dict[str, Any]) -> str:
