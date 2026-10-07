@@ -1,0 +1,55 @@
+name: Agent CI
+
+# 说明：仓库只上传代码（语料受版权限制、模型权重过大），
+# 因此 CI 用 eval/fixtures/mini_corpus.jsonl 这份合成语料做端到端冒烟，
+# 并对已产出的评测指标执行「不得退化」的门禁检查。
+# 需要完整指标的本地回归请先跑：
+#   python eval/evaluate.py --semantic && python eval/calibrate_refusal.py
+#   python eval/injection_eval.py && python eval/tool_call_eval.py
+#   python eval/multiagent_eval.py && python eval/ttft_bench.py && python -m agent.eval_agent
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install minimal deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install jieba
+
+      - name: Byte-compile all sources
+        run: python -m compileall -q agent kb eval
+
+      - name: Unit tests (no corpus needed)
+        run: python agent/tests/test_guardrails.py
+
+      - name: Unit tests (mini corpus)
+        env:
+          AGENT_KB_PATH: eval/fixtures/mini_corpus.jsonl
+        run: |
+          python agent/tests/test_offline.py
+          python agent/tests/test_fc_pipeline.py
+          python agent/tests/test_multiagent.py
+
+      - name: End-to-end smoke on mini corpus
+        run: python eval/ci_smoke.py
+
+      - name: Metrics gate (skips missing, fails on regression)
+        run: python eval/ci_gate.py

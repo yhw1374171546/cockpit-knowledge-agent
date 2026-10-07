@@ -18,6 +18,10 @@ eval/*.json
 eval/*.jsonl
 eval/*.md
 
+# 例外：门禁阈值是配置、迷你语料是 CI 资产，必须入库（否则 CI 跑不起来）
+!eval/thresholds.json
+!eval/fixtures/*.jsonl
+
 # ── 求职材料（简历、分析报告、课程原始文档备份）──
 docs/
 

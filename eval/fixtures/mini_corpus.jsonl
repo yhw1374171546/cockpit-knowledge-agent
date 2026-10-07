@@ -1,0 +1,24 @@
+{"id": 0, "text": "危险警告灯开关在方向盘下方，按下开关即可打开危险警告灯。车辆遇到交通事故或其他紧急情况时，按下危险警告灯按键，启用危险警告灯，两侧转向指示灯均闪烁。", "source": "fixture_manual.pdf", "page": 3, "header": "灯光", "strategy": "fixture"}
+{"id": 1, "text": "前排座椅加热通过中央显示屏调节。在多媒体显示屏上依次点击座舱体验、座椅、加热，在该界面下可以设置驾驶员或副驾驶员侧座椅加热强度，也可以关闭座椅加热功能。", "source": "fixture_manual.pdf", "page": 5, "header": "座椅", "strategy": "fixture"}
+{"id": 2, "text": "胎压低报警被激活时，对应报警轮胎开始闪烁，胎压监测系统状态指示灯持续点亮直到报警消除，并伴有声音报警，同时仪表显示屏弹出提示信息。在冷态充气至标准胎压值后，以 30 km/h 以上的车速行驶几分钟，胎压过低报警解除。", "source": "fixture_manual.pdf", "page": 7, "header": "轮胎", "strategy": "fixture"}
+{"id": 3, "text": "保养项目保养时间按照时间和里程确定保养周期。正常情况下，车辆的行驶里程决定了执行保养的周期。首次保养建议在 5000 km 或 6 个月时进行，以先到者为准。", "source": "fixture_manual.pdf", "page": 12, "header": "保养", "strategy": "fixture"}
+{"id": 4, "text": "如果仪表显示屏显示报警系统故障等指示性信息时，表示报警系统存在故障，请立即联系 Lynk&Co 领克中心进行检查和修理。禁止在故障状态下继续长距离行驶。", "source": "fixture_manual.pdf", "page": 14, "header": "安全", "strategy": "fixture"}
+{"id": 5, "text": "使用购车时预留的手机号码创建的 Lynk&Co ID 称为车主账户。一部车辆只能创建一个车主账户。创建 ID 时请确保手机号码和购车时预留的手机号码相同。", "source": "fixture_manual.pdf", "page": 2, "header": "账户", "strategy": "fixture"}
+{"id": 6, "text": "蓝牙连接：在中央显示屏中点击设置、连接、蓝牙，开启蓝牙后选择需要配对的手机名称，确认配对码一致即可完成连接。连接成功后可以播放手机音乐并接打电话。", "source": "fixture_manual.pdf", "page": 22, "header": "多媒体", "strategy": "fixture"}
+{"id": 7, "text": "空调开启：在中央显示屏底部点击空调开启按键，进入空调控制界面，可以调节温度、风量、出风模式与内外循环。按下 AUTO 按键可自动维持设定温度。", "source": "fixture_manual.pdf", "page": 24, "header": "空调", "strategy": "fixture"}
+{"id": 8, "text": "无线充电：将支持无线充电的手机放置在中央扶手箱内的充电区域，确保手机背面与充电板贴合。充电时手机屏幕会显示充电图标。若手机带有金属保护壳，请先取下。", "source": "fixture_manual.pdf", "page": 26, "header": "充电", "strategy": "fixture"}
+{"id": 9, "text": "电动尾门：长按智能钥匙上的尾门按键或在尾门处按下开启按键，即可电动开启尾门。开启过程中请勿强行阻止，以免损坏电动撑杆。", "source": "fixture_manual.pdf", "page": 28, "header": "尾门", "strategy": "fixture"}
+{"id": 10, "text": "雨刮器：向下拨动雨刮控制杆可开启单次刮刷，向上拨动切换间歇、低速与高速挡位。向内拨动控制杆可喷洗玻璃。冬季使用前请先清除刮片上的积冰。", "source": "fixture_manual.pdf", "page": 30, "header": "雨刮", "strategy": "fixture"}
+{"id": 11, "text": "远光灯：将灯光控制杆向远离驾驶员方向推动即可开启远光灯，回拉则闪烁远光灯。会车与跟车时请切换为近光灯，避免对其他驾驶员造成眩目。", "source": "fixture_manual.pdf", "page": 32, "header": "灯光", "strategy": "fixture"}
+{"id": 12, "text": "儿童锁：在后门侧面可以看到儿童锁开关，用机械钥匙旋转至锁止位置后，后门只能从车外打开。建议搭载儿童时始终启用儿童锁。", "source": "fixture_manual.pdf", "page": 34, "header": "车门", "strategy": "fixture"}
+{"id": 13, "text": "自适应巡航：在方向盘左侧按下巡航开启按键，仪表显示巡航图标后设定车速。系统会根据前车距离自动调整车速，驾驶员仍需保持注意力并随时准备接管。", "source": "fixture_manual.pdf", "page": 36, "header": "驾驶辅助", "strategy": "fixture"}
+{"id": 14, "text": "安全带未系提醒：当驾驶员或乘员未系安全带时，仪表显示屏会点亮安全带指示灯并伴有提示音。请务必在行车前系好安全带。", "source": "fixture_manual.pdf", "page": 38, "header": "安全", "strategy": "fixture"}
+{"id": 15, "text": "开门预警系统（DOW）：当车辆静止或行驶速度低于 5 km/h 时，开门预警系统针对相邻两侧后方的交通状况进行检测。当开门存在潜在碰撞风险时，将闪烁外后视镜指示灯及氛围灯并发出声音警告。", "source": "fixture_manual.pdf", "page": 40, "header": "驾驶安全", "strategy": "fixture"}
+{"id": 16, "text": "防盗系统会在车辆锁止 10 秒后进入戒备状态，当未采用合法方式打开车门、机舱盖或尾门时会触发防盗系统，通过灯光和声音发出警报。解锁车辆后防盗系统自动关闭。", "source": "fixture_manual.pdf", "page": 42, "header": "防盗", "strategy": "fixture"}
+{"id": 17, "text": "碰撞后处置：如果安全气囊触发或安全带预紧触发，车辆会进入安全模式，车门会自动解锁以协助乘员逃生和救援。此时不要尝试重新启动车辆或自行修理，应使用平板拖车将车辆运至 Lynk&Co 领克中心检查。", "source": "fixture_manual.pdf", "page": 44, "header": "事故处置", "strategy": "fixture"}
+{"id": 18, "text": "动力电池过热警告：当仪表显示动力电池温度过高提示时，请立即在安全位置停车并远离车辆，联系 Lynk&Co 领克中心处理，切勿继续行驶或充电。", "source": "fixture_manual.pdf", "page": 46, "header": "高压系统", "strategy": "fixture"}
+{"id": 19, "text": "充电口盖：车辆解锁状态下按压充电口盖即可开启。若无法开启，可从中控屏的充电设置中手动解锁充电口盖。寒冷天气下充电口盖可能因结冰而难以开启。", "source": "fixture_manual.pdf", "page": 48, "header": "充电", "strategy": "fixture"}
+{"id": 20, "text": "泊车辅助：挂入倒挡后泊车辅助系统自动激活，通过雷达与摄像头检测车辆周围的障碍物，并在中央显示屏上显示距离提示与警示音。可通过设置界面关闭该功能。", "source": "fixture_manual.pdf", "page": 50, "header": "泊车", "strategy": "fixture"}
+{"id": 21, "text": "前机舱盖：拉动驾驶室左侧的机舱盖开启手柄，机舱盖会弹起一小段距离，然后走到车头，拨动机舱盖前端的锁扣即可完全打开。关闭时请从约 30 cm 高度自由落下并确认锁止。", "source": "fixture_manual.pdf", "page": 52, "header": "机舱盖", "strategy": "fixture"}
+{"id": 22, "text": "外后视镜加热：在中央显示屏的空调界面中点击后除霜按键，外后视镜加热功能会同时开启，用于消除镜面上的雾气与薄霜，一段时间后自动关闭。", "source": "fixture_manual.pdf", "page": 54, "header": "后视镜", "strategy": "fixture"}
+{"id": 23, "text": "组合仪表：左侧信息显示区域显示车辆当前车速与驾驶员辅助系统相关信息，右侧显示多媒体、电话、胎压与车辆行程信息，仪表还会根据车辆状态弹出相应的报警提示信息。", "source": "fixture_manual.pdf", "page": 56, "header": "仪表", "strategy": "fixture"}

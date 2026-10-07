@@ -22,8 +22,13 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
-from agent.llm import LLMBackend, RuleBasedPlannerLLM, ToolCall
+from agent.executor import ToolExecutor
+from agent.guardrails.budget import BudgetTracker
+from agent.guardrails.injection import InjectionDetector, isolate_evidence
+from agent.guardrails.policy import PolicyContext, PolicyEngine
+from agent.llm import LLMBackend, RuleBasedPlannerLLM, ToolCall, estimate_tokens
 from agent.memory import ConversationMemory
+from agent.obs.tracer import Tracer
 from agent.reflection import NO_ANSWER, Reflector
 from agent.tools import ToolRegistry
 
@@ -69,8 +74,17 @@ class AgentState:
     retries: int = 0
     reflection: Optional[Dict[str, Any]] = None
     gate_coverage: Optional[float] = None
+    tokens_in: int = 0
+    tokens_out: int = 0
+    injection_risk: int = 0
+    injection_flagged: bool = False
+    policy_blocks: List[Dict[str, Any]] = field(default_factory=list)
     trace: List[Dict[str, Any]] = field(default_factory=list)
     latency_ms: Dict[str, float] = field(default_factory=dict)
+
+    @property
+    def tokens_total(self) -> int:
+        return self.tokens_in + self.tokens_out
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -81,6 +95,9 @@ class AgentState:
                           "score": e.get("score"), "page": e.get("page")} for e in self.evidence],
             "tool_calls": self.tool_calls, "steps": self.steps, "retries": self.retries,
             "gate_coverage": self.gate_coverage,
+            "tokens_in": self.tokens_in, "tokens_out": self.tokens_out,
+            "injection_risk": self.injection_risk, "injection_flagged": self.injection_flagged,
+            "policy_blocks": self.policy_blocks,
             "reflection": self.reflection, "latency_ms": self.latency_ms, "trace": self.trace,
         }
 
@@ -92,12 +109,30 @@ class AgentGraph:
     def __init__(self, llm: LLMBackend, registry: ToolRegistry,
                  reflector: Optional[Reflector] = None,
                  memory: Optional[ConversationMemory] = None,
-                 config: Optional[AgentConfig] = None):
+                 config: Optional[AgentConfig] = None,
+                 tracer: Optional[Tracer] = None,
+                 policy: Optional[PolicyEngine] = None,
+                 budget: Optional[BudgetTracker] = None,
+                 executor: Optional[ToolExecutor] = None,
+                 detector: Optional[InjectionDetector] = None,
+                 isolate_evidence: bool = True,
+                 agent_name: str = "agent"):
         self.llm = llm
         self.registry = registry
         self.reflector = reflector or Reflector()
         self.memory = memory or ConversationMemory()
         self.config = config or AgentConfig()
+        self.tracer = tracer or Tracer(enabled=False)
+        self.policy = policy or PolicyEngine()
+        self.budget = budget
+        self.agent_name = agent_name
+        self.detector = detector or InjectionDetector()
+        self.isolate_evidence = isolate_evidence
+        self.executor = executor or ToolExecutor(registry, policy=self.policy, tracer=self.tracer,
+                                                 agent=agent_name)
+        # 让 LLM 侧的参数修复器认识本 Agent 可见的工具（纠正工具名幻觉）
+        if hasattr(self.llm, "set_known_tools"):
+            self.llm.set_known_tools(registry.names())
 
     # ── 对外入口 ──
     def run(self, question: str, memory: Optional[ConversationMemory] = None) -> AgentState:
@@ -105,8 +140,17 @@ class AgentGraph:
         start = time.perf_counter()
         resolved = mem.resolve(question)
         state = AgentState(question=question, resolved_question=resolved)
+        self.policy.new_turn()
 
-        mem.add_user(question)
+        with self.tracer.span("agent.run", self.agent_name, question=question[:40]) as span:
+            state = self._run_inner(state, mem, resolved, start)
+            span.attrs["status"] = state.status
+            span.attrs["steps"] = state.steps
+            return state
+
+    def _run_inner(self, state: AgentState, mem: ConversationMemory,
+                   resolved: str, start: float) -> AgentState:
+        mem.add_user(state.question)
         state.route = self._route(resolved)
         state.trace.append({"node": "router", "route": state.route})
 
@@ -117,11 +161,27 @@ class AgentGraph:
 
         while state.steps < self.config.max_steps:
             state.steps += 1
+            if self.budget is not None:
+                self.budget.step()
+                if self.budget.exhausted:
+                    state.trace.append({"node": "budget", "stop_reason": self.budget.exhausted_reason})
+                    return self._finalize(state, NO_ANSWER, mem, start)
             t0 = time.perf_counter()
             response = self.llm.chat(messages, tools=self.registry.specs(),
                                      temperature=0.0, max_tokens=1024)
+            llm_ms = (time.perf_counter() - t0) * 1000
             state.latency_ms.setdefault("llm", 0.0)
-            state.latency_ms["llm"] += (time.perf_counter() - t0) * 1000
+            state.latency_ms["llm"] += llm_ms
+            usage = response.usage or {}
+            tokens_in = int(usage.get("prompt_tokens") or 0) or \
+                sum(estimate_tokens(m.get("content") or "") for m in messages)
+            tokens_out = int(usage.get("completion_tokens") or 0) or estimate_tokens(response.content or "")
+            self.tracer.record_llm(tokens_in, tokens_out, model=getattr(self.llm, "name", ""),
+                                   agent=self.agent_name, latency_ms=llm_ms)
+            if self.budget is not None:
+                self.budget.charge_tokens(tokens_in, tokens_out)
+            state.tokens_in += tokens_in
+            state.tokens_out += tokens_out
 
             # ── 无工具调用：先过硬门控，再产出答案 ──
             if not response.wants_tool:
@@ -166,23 +226,32 @@ class AgentGraph:
                                  "content": f"检索证据不足，请用改写后的查询重新检索：{rewritten}"})
                 continue
 
-            # ── 正常工具调用 ──
+            # ── 正常工具调用（经执行器：策略裁决 → 幂等 → 并行 → 记账）──
             messages.append({"role": "assistant", "content": None,
                              "tool_calls": [c.to_openai() for c in response.tool_calls]})
             new_evidence = 0
             progressed = False
-            for call in response.tool_calls:
-                t1 = time.perf_counter()
-                result = self.registry.call(call.name, call.arguments or {})
-                state.latency_ms.setdefault("tools", 0.0)
-                state.latency_ms["tools"] += (time.perf_counter() - t1) * 1000
+            ctx = PolicyContext(agent=self.agent_name, turn=state.steps,
+                                injection_risk=state.injection_risk,
+                                injection_suspicious=state.injection_flagged)
+            t1 = time.perf_counter()
+            executed = self.executor.execute(response.tool_calls, ctx, self.budget)
+            state.latency_ms.setdefault("tools", 0.0)
+            state.latency_ms["tools"] += (time.perf_counter() - t1) * 1000
+
+            for item in executed:
+                call, result = item.call, item.result
                 state.tool_calls.append({"step": state.steps, "tool": call.name,
                                          "arguments": call.arguments, "ok": result.ok,
-                                         "repeated": result.repeated, "error": result.error})
+                                         "repeated": result.repeated, "error": result.error,
+                                         "blocked": item.blocked, "repaired": call.repaired,
+                                         "idempotent_reuse": item.idempotent_reuse})
                 state.trace.append({"node": "tool_executor", "step": state.steps,
                                     "tool": call.name, "ok": result.ok,
-                                    "repeated": result.repeated,
-                                    "latency_ms": round(result.latency_ms, 2)})
+                                    "blocked": item.blocked, "repeated": result.repeated,
+                                    "latency_ms": round(item.duration_ms, 2)})
+                if item.blocked:
+                    state.policy_blocks.append({"tool": call.name, "reason": item.reason})
 
                 if result.meta.get("needs_confirmation"):
                     state.status = "needs_confirmation"
@@ -191,18 +260,29 @@ class AgentGraph:
                     state.latency_ms["total"] = (time.perf_counter() - start) * 1000
                     return state
 
-                messages.append({"role": "tool", "name": call.name,
-                                 "content": result.to_observation()})
+                # 证据入库 + 注入检测（检索内容是最典型的注入载体）
+                if result.ok and isinstance(result.data, list):
+                    for ev in result.data:
+                        if isinstance(ev, dict) and ev.get("text"):
+                            report = self.detector.detect(ev["text"], ev.get("citation", ""))
+                            if report.suspicious:
+                                state.injection_risk += report.risk_score
+                                state.injection_flagged = True
+                                self.tracer.record_guard(
+                                    "flag", f"疑似注入 {report.families} 来源={ev.get('citation','')}",
+                                    agent=self.agent_name)
+                            if not any(e.get("chunk_id") == ev.get("chunk_id")
+                                       for e in state.evidence):
+                                state.evidence.append(ev)
+                                new_evidence += 1
+
+                observation = result.to_observation()
+                if self.isolate_evidence and result.ok:
+                    observation = self._isolate_observation(observation, result)
+                messages.append({"role": "tool", "name": call.name, "content": observation})
 
                 if result.ok and not result.repeated:
                     progressed = True
-                    payload = result.data if isinstance(result.data, list) else []
-                    for item in payload:
-                        if isinstance(item, dict) and item.get("text"):
-                            if not any(e.get("chunk_id") == item.get("chunk_id")
-                                       for e in state.evidence):
-                                state.evidence.append(item)
-                                new_evidence += 1
 
             # ── 无进展检测：没有新证据且没有新工具成功执行 → 终止 ──
             if not progressed and state.steps > 1:
@@ -247,6 +327,21 @@ class AgentGraph:
             return NO_ANSWER
         return "；".join(e.get("text", "")[:40] for e in state.evidence[:2]) or NO_ANSWER
 
+    def _isolate_observation(self, observation: str, result) -> str:
+        """把工具返回的证据文本做「数据隔离」，防止内容里的指令被当成指令执行。"""
+        data = result.data
+        if not isinstance(data, list):
+            return observation
+        isolated_items = []
+        for ev in data:
+            if isinstance(ev, dict) and ev.get("text"):
+                clone = dict(ev)
+                clone["text"] = isolate_evidence(ev["text"], ev.get("citation", ""), self.detector)
+                isolated_items.append(clone)
+            else:
+                isolated_items.append(ev)
+        return json.dumps({"ok": True, "data": isolated_items}, ensure_ascii=False)
+
     def _finalize(self, state: AgentState, answer: str, mem: ConversationMemory,
                   start: float) -> AgentState:
         answer = (answer or "").strip()
@@ -279,6 +374,17 @@ class AgentGraph:
             mem.set_topic(topic)
         mem.add_assistant(answer, [t["tool"] for t in state.tool_calls])
         state.latency_ms["total"] = (time.perf_counter() - start) * 1000
+
+        # 失败归因写进 trace，便于回归对比与线上定位
+        self.tracer.classify_failure({
+            "injection_flagged": state.injection_flagged,
+            "policy_blocked": bool(state.policy_blocks),
+            "budget_exhausted": bool(self.budget and self.budget.exhausted),
+            "tool_error": any(t.get("error") for t in state.tool_calls),
+            "parse_failed": any(t.get("repaired") and not t.get("ok") for t in state.tool_calls),
+            "refused": (state.answer or "").strip() == NO_ANSWER,
+            "grounded_ratio": (state.reflection or {}).get("grounded_ratio"),
+        })
         return state
 
 

@@ -28,6 +28,9 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_KB = os.path.join(ROOT, "all_text.txt")
 DEFAULT_KB_JSONL = os.path.join(ROOT, "kb", "chunks.jsonl")
+# 迷你语料：仓库不含受版权限制的真实手册，CI 与快速试用走这份合成语料
+FIXTURE_KB = os.path.join(ROOT, "eval", "fixtures", "mini_corpus.jsonl")
+KB_ENV_VAR = "AGENT_KB_PATH"
 
 
 # ── 分词 ─────────────────────────────────────────────────────────────
@@ -142,7 +145,7 @@ class Evidence:
     def to_dict(self) -> Dict:
         return {"chunk_id": self.chunk_id, "score": round(self.score, 4), "page": self.page,
                 "header": self.header, "retriever": self.retriever,
-                "citation": self.citation, "text": self.text}
+                "source": self.source, "citation": self.citation, "text": self.text}
 
 
 # ── BM25 ─────────────────────────────────────────────────────────────
@@ -193,9 +196,24 @@ class KnowledgeBase:
 
     # -- 加载 ----------------------------------------------------------
     @classmethod
+    def resolve_path(cls, path: Optional[str] = None) -> str:
+        """确定知识库来源：显式路径 > 环境变量 AGENT_KB_PATH > kb/chunks.jsonl >
+        all_text.txt > 迷你语料（仓库自带，保证克隆后即可运行）。"""
+        if path:
+            return path
+        env = os.environ.get(KB_ENV_VAR)
+        if env and os.path.exists(env):
+            return env
+        if os.path.exists(DEFAULT_KB_JSONL):
+            return DEFAULT_KB_JSONL
+        if os.path.exists(DEFAULT_KB):
+            return DEFAULT_KB
+        return FIXTURE_KB
+
+    @classmethod
     def load(cls, path: Optional[str] = None, prefer_jieba: bool = True,
              with_vector: bool = False, vector_model: Optional[str] = None) -> "KnowledgeBase":
-        path = path or (DEFAULT_KB_JSONL if os.path.exists(DEFAULT_KB_JSONL) else DEFAULT_KB)
+        path = cls.resolve_path(path)
         kb = cls(tokenizer=Tokenizer(prefer_jieba))
         if path.endswith(".jsonl"):
             with open(path, encoding="utf-8") as f:

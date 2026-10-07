@@ -182,6 +182,28 @@ class ToolRegistry:
     def register(self, spec: ToolSpec) -> None:
         self.tools[spec.name] = spec
 
+    def subset(self, names, name: str = "sub-agent") -> "ToolRegistry":
+        """派生一个只暴露指定工具的注册表（用于子 Agent 的工具白名单）。
+
+        白名单是最小权限原则的落地：子 Agent 看不到不该用的工具，就不可能误调用——
+        这也是多 Agent 相对"单 Agent 挂全部工具"的可量化收益之一。
+        """
+        scoped = ToolRegistry.__new__(ToolRegistry)
+        scoped.kb = self.kb
+        scoped.telemetry = self.telemetry
+        scoped.specs_data = self.specs_data
+        scoped.maintenance = self.maintenance
+        scoped.confirmed_actions = self.confirmed_actions      # 确认状态在父子间共享
+        scoped._cache = self._cache                            # 调用缓存共享，跨 Agent 去重
+        scoped.call_counts = self.call_counts
+        scoped.trace = self.trace
+        scoped.tools = {n: self.tools[n] for n in names if n in self.tools}
+        scoped.scope_name = name
+        return scoped
+
+    def names_of_scope(self) -> str:
+        return getattr(self, "scope_name", "all")
+
     def specs(self) -> List[Dict[str, Any]]:
         return [t.to_openai_schema() for t in self.tools.values()]
 
