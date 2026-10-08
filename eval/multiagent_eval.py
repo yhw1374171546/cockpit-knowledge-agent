@@ -210,11 +210,17 @@ def main():
                   f"{'✅' if r['directive'] else '—'} |")
     md += [
         "\n## 4. 结论与代价（如实说明）\n",
-        f"- **安全合规是最大增量**：单 Agent 没有最终把关，critical 场景安全指令合规率 "
-        f"{summary['single']['safety_directive_rate']:.2%}；多 Agent 由安全评审 Agent 兜底，"
-        f"达到 **{summary['multi']['safety_directive_rate']:.2%}**；",
-        f"- **冲突仲裁是单 Agent 完全没有的能力**：多 Agent 检出率 "
-        f"{summary['multi']['conflict_detection_rate']:.2%}，并把"
+        "- **安全合规（口径已更新）**：单 Agent 的合规率为 "
+        f"{summary['single']['safety_directive_rate']:.2%}，多 Agent 为 "
+        f"**{summary['multi']['safety_directive_rate']:.2%}**。\n"
+        "  ⚠️ 这个指标**不再是多 Agent 的增量来源**：单 Agent 链路已加入"
+        "「安全硬门控」（critical 场景强制前置停驶/联系中心指令，见 "
+        "`agent/protocols.py::ensure_safety_directive`），因此两者都能达到 100%。\n"
+        "  换句话说，**安全兜底可以是单 Agent 的一个确定性规则，不必依赖多 Agent**——"
+        "把这一点如实写出来，比拿一个已经被单 Agent 追平的指标当卖点更可信。",
+        f"- **冲突仲裁仍是单 Agent 完全没有的能力**：多 Agent 检出率 "
+        f"{summary['multi']['conflict_detection_rate']:.2%}（单 Agent "
+        f"{summary['single']['conflict_detection_rate']:.2%}），并把"
         "「手册通用建议 vs 实时严重风险」显式裁决为安全优先；",
         f"- **代价**：多 Agent 的 token 消耗为 "
         f"{summary['multi']['avg_tokens']} vs 单 Agent {summary['single']['avg_tokens']}"

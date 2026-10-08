@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # ── 风险等级（仲裁的核心依据）────────────────────────────────────────
 RISK_OK = "ok"
@@ -34,6 +34,28 @@ SAFETY_DIRECTIVES = (
     "请立即在安全位置靠边停车，不要继续行驶",
     "请联系 Lynk&Co 领克中心或道路救援",
 )
+
+# ── 单 Agent 的安全硬门控（A2）────────────────────────────────────────
+# 背景：多轮评测发现，单 Agent 链路在大语料下**安全指令产出率 60% → 0%**、
+# 跨轮保持率 70% → 10%。根因是单 Agent 没有安全硬门控——安全提醒完全依赖
+# "恰好检索到写着安全处置的那一段"，而 9301 块下 top-6 很容易被更"对口"的块挤掉。
+# 这里把"是否需要强制安全指令"的判断做成确定性规则（不依赖检索命中）。
+CRITICAL_TELEMETRY_RULES = (
+    # (判定函数, 说明)
+    (lambda t: any(lamp in str(t.get("告警灯", []))
+                   for lamp in ("制动", "刹车", "气囊", "动力电池过热", "高压")),
+     "仪表存在高优先级安全告警灯"),
+    (lambda t: any(float(v) < 180 for v in (t.get("胎压_kPa") or {}).values()),
+     "存在严重亏气轮胎（<180 kPa）"),
+    (lambda t: (t.get("剩余电量_%") is not None and float(t["剩余电量_%"]) < 10
+                and any("过热" in str(x) for x in (t.get("告警灯") or []))),
+     "动力电池过热且电量极低"),
+)
+
+CRITICAL_QUESTION_PATTERNS = re.compile(
+    r"(碰撞|撞了|起火|着火|冒烟|冒白烟|刹车失灵|制动失效|方向盘锁死|失控|翻车|"
+    r"动力电池过热|电池过热|高压漏电|漏电|冒火花|气囊弹出|继续开|还能开|还能继续)")
+
 
 # 与"安全优先"冲突的通用建议（手册里常见的可继续行驶表述）
 PERMISSIVE_PATTERNS = re.compile(
@@ -200,3 +222,55 @@ def extract_numbers(text: str) -> Dict[str, float]:
         except ValueError:
             continue
     return out
+
+
+# ── 安全硬门控（A2）──────────────────────────────────────────────────
+
+def assess_critical_risk(question: str, telemetry: Optional[Dict] = None) -> Tuple[bool, str]:
+    """判断本轮是否必须给出安全处置指令（确定性规则，不依赖检索命中）。
+
+    返回 (是否 critical, 判定依据)。判定来自两侧证据：
+    - **实时车况**：高优先级告警灯、严重亏气轮胎、电池过热等；
+    - **问题本身**：碰撞/起火/制动失效/「还能开吗」这类高风险问法。
+
+    为什么需要它：单 Agent 原本把安全指令完全交给"检索到的那段原文"，
+    大语料下 top-6 被更对口的块挤掉后，安全提醒就整段消失了（实测产出率 60%→0%）。
+    安全这种**不能依赖概率**的能力，必须由规则兜底。
+    """
+    telemetry = telemetry or {}
+    for rule, reason in CRITICAL_TELEMETRY_RULES:
+        try:
+            if rule(telemetry):
+                return True, reason
+        except (TypeError, ValueError):
+            continue
+    if CRITICAL_QUESTION_PATTERNS.search(question or ""):
+        return True, "问题涉及高风险场景（碰撞/起火/制动失效/能否继续行驶）"
+    return False, ""
+
+
+def ensure_safety_directive(answer: str, question: str,
+                            telemetry: Optional[Dict] = None,
+                            risk_level: str = RISK_OK) -> Tuple[str, str, bool]:
+    """必要时把安全指令**前置**到答案里，并返回 (答案, 风险等级, 是否注入)。
+
+    只在同时满足「判定为 critical」且「答案里确实没有安全指令」时才注入，
+    避免正常问答被无谓地加上安全话术（那会让所有回答都变得像免责声明）。
+    """
+    critical, reason = assess_critical_risk(question, telemetry)
+    if risk_at_least(risk_level, RISK_CRITICAL):
+        critical = True
+        reason = reason or "上游已判定为 critical"
+    if not critical:
+        return answer, risk_level, False
+
+    text = answer or ""
+    missing = [d for d in SAFETY_DIRECTIVES if d[:12] not in text]
+    if len(missing) == len(SAFETY_DIRECTIVES):
+        prefix = "；".join(SAFETY_DIRECTIVES) + f"。（判定依据：{reason}）"
+        merged = f"{prefix} {text}".strip() if text and text != "无答案" else prefix
+        return merged, RISK_CRITICAL, True
+    if missing:                                   # 只缺一条 → 补上缺的那条
+        merged = f"{missing[0]}。 {text}".strip()
+        return merged, RISK_CRITICAL, True
+    return answer, RISK_CRITICAL, False

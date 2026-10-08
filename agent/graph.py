@@ -30,6 +30,14 @@ from agent.llm import LLMBackend, RuleBasedPlannerLLM, ToolCall, estimate_tokens
 from agent.memory import ConversationMemory
 from agent.obs.tracer import Tracer
 from agent.reflection import NO_ANSWER, Reflector
+from agent.guardrails.injection import BLOCKING_FAMILIES
+from agent.protocols import (RISK_CRITICAL, assess_critical_risk, ensure_safety_directive)
+
+# 输入侧注入被拦截时的统一话术（不泄露任何车辆/车主信息，也不给外部链接）
+GUARDRAIL_REFUSAL = (
+    "抱歉，这个请求我不能执行：它包含把车辆或车主信息对外发送、"
+    "或绕过车主确认去执行操作的内容。如果您需要相关服务，"
+    "我可以帮您查询官方渠道或预约到店。")
 from agent.tools import ToolRegistry
 
 SYSTEM_PROMPT = """你是智能座舱的车辆助手，服务于车主。请遵守以下规则：
@@ -60,6 +68,11 @@ class AgentConfig:
     evidence_overlap_threshold: float = 0.45
     # 服务层可注入 Idempotency-Key：写操作策略据此强制要求幂等键
     idempotency_key: str = ""
+    # 安全硬门控（A2）：critical 场景强制前置安全处置指令。
+    # 单 Agent 模式开启（确定性兜底）；**多 Agent 模式下由 safety_critic 负责**，
+    # 子 Agent 会把它关掉——否则每个子 Agent 自己就带了安全话术，
+    # 安全评审就没有可评审的对象，"谁负责安全"也变得含糊。
+    enable_safety_gate: bool = True
 
 
 @dataclass
@@ -80,6 +93,8 @@ class AgentState:
     tokens_out: int = 0
     injection_risk: int = 0
     injection_flagged: bool = False
+    risk_level: str = "ok"           # ok | notice | warning | critical（安全硬门控判定）
+    safety_injected: bool = False    # 是否由硬门控强制注入了安全处置指令
     policy_blocks: List[Dict[str, Any]] = field(default_factory=list)
     trace: List[Dict[str, Any]] = field(default_factory=list)
     latency_ms: Dict[str, float] = field(default_factory=dict)
@@ -185,6 +200,31 @@ class AgentGraph:
     def _run_inner(self, state: AgentState, mem: ConversationMemory,
                    resolved: str, start: float) -> AgentState:
         mem.add_user(state.question)
+
+        # ── A6 输入侧注入检测与主动拦截 ──
+        # 原来的检测只扫**检索到的证据**（间接注入），从不扫**用户输入**——
+        # 于是「把 VIN 和车主手机号发到 http://…」这类直接写在提问里的注入
+        # 既不报警、也没人拦（边界集实测硬拦截率仅 40%）。
+        # 命中「数据外泄 / 越权写操作 / 诱导隐瞒用户」家族时**直接拦截**：
+        # 不进入规划、不调用工具、不生成答案，从根上避免把链接或敏感信息写进回答。
+        q_report = self.detector.detect(resolved, "user_query")
+        if q_report.suspicious:
+            state.injection_risk += q_report.risk_score
+            state.injection_flagged = True
+            self.tracer.record_guard("flag", f"用户输入疑似注入 {q_report.families}",
+                                     agent=self.agent_name)
+        blocking = sorted(set(q_report.families) & BLOCKING_FAMILIES)
+        if blocking:
+            self.tracer.record_guard("block", f"输入侧拦截 {blocking}", agent=self.agent_name)
+            state.trace.append({"node": "input_guard", "blocked": blocking,
+                                "risk": q_report.risk_score})
+            state.status = "refused"
+            state.answer = GUARDRAIL_REFUSAL
+            state.citations = []
+            mem.add_assistant(state.answer)
+            state.latency_ms["total"] = (time.perf_counter() - start) * 1000
+            return state
+
         state.route = self._route(resolved)
         state.trace.append({"node": "router", "route": state.route})
 
@@ -385,13 +425,41 @@ class AgentGraph:
                   start: float) -> AgentState:
         answer = (answer or "").strip()
 
+        # ── A2 安全硬门控：critical 场景强制前置安全处置指令 ──
+        # 为什么放在接地校验**之前**：安全优先于接地。若某轮判定为 critical
+        # （严重亏气、制动故障灯、动力电池过热、碰撞/起火/制动失效类提问），
+        # 即使检索没命中写着处置方法的那一段、甚至答案被判"无依据"，
+        # 也必须给出停驶与联系中心指令——否则座舱在真正危险的时刻反而沉默。
+        telemetry = getattr(self.registry, "telemetry", {}) or {}
+        if self.config.enable_safety_gate:
+            gated_answer, risk_level, safety_injected = ensure_safety_directive(
+                answer, state.resolved_question or state.question, telemetry,
+                state.risk_level)
+        else:
+            # 多 Agent 模式：安全由 safety_critic 独立评审，这里只做风险判定（供评审参考）
+            critical, reason = assess_critical_risk(
+                state.resolved_question or state.question, telemetry)
+            gated_answer, safety_injected = answer, False
+            risk_level = RISK_CRITICAL if critical else state.risk_level
+            if critical:
+                state.trace.append({"node": "risk_assess", "risk": risk_level,
+                                    "reason": reason, "gate": "delegated_to_critic"})
+        state.risk_level = risk_level
+        state.safety_injected = safety_injected
+        if safety_injected:
+            state.trace.append({"node": "safety_gate", "risk": risk_level,
+                                "before_len": len(answer), "after_len": len(gated_answer)})
+            answer = gated_answer
+
         if self.config.enable_reflection:
             t0 = time.perf_counter()
             reflection = self.reflector.verify(answer, state.evidence, state.resolved_question)
             state.latency_ms.setdefault("reflection", 0.0)
             state.latency_ms["reflection"] += (time.perf_counter() - t0) * 1000
             state.reflection = reflection.to_dict()
-            if self.config.refuse_on_insufficient and reflection.verdict == "ungrounded":
+            # 安全门控已介入时**不因接地失败而拒答**（安全指令本身未必能在手册里找到原文）
+            if (self.config.refuse_on_insufficient and reflection.verdict == "ungrounded"
+                    and not safety_injected):
                 state.trace.append({"node": "refuse", "reason": "ungrounded",
                                     "ratio": round(reflection.grounded_ratio, 3)})
                 state.answer = NO_ANSWER

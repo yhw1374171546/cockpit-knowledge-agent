@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Dict, List, Optional, Sequence
 
 from agent.guardrails.budget import Budget, BudgetTracker
@@ -61,7 +62,14 @@ class SubAgent:
         self.policy = policy or PolicyEngine()
         base_registry = parent_registry or build_default_registry()
         self.registry = base_registry.subset(self.allowed_tools, self.name)
-        self.config = config or AgentConfig()
+        # 注意：必须**复制**配置再改，不能直接改传入的 config ——
+        # Supervisor 的 baseline 图与所有子 Agent 共享同一个 config 对象，
+        # 直接改会把 baseline 的安全门控也一起关掉（别名 bug，实测导致
+        # 单 Agent 基线的安全指令合规率错误地停在 0%）。
+        self.config = replace(config) if config is not None else AgentConfig()
+        # 多 Agent 模式：安全指令由 safety_critic 独立评审并负责注入，
+        # 子 Agent 只做风险判定（见 AgentConfig.enable_safety_gate 的说明）。
+        self.config.enable_safety_gate = False
         self.llm = llm or ScopedPlanner(self.kind, self.planner_kinds or (self.kind,))
         self.reflector = Reflector(evidence_overlap_threshold=self.config.evidence_overlap_threshold)
         self.graph = AgentGraph(self.llm, self.registry, reflector=self.reflector,

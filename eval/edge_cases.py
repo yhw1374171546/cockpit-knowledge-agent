@@ -366,9 +366,13 @@ def render_md(summary: Dict, rows: List[Dict], kb_path: str) -> str:
         "真实 TTFT/端到端延迟见 `eval/ttft_report.md` 与 `eval/load_report.md`；",
         "4. **注入类用例只做回归**：完整攻击面（44 攻击 + 12 良性）见 "
         "`eval/injection_report.md`，这里只确保边界输入不会绕过同一套护栏；"
-        "本次实测的 `注入检出率 80% / 硬拦截率 40%` 说明"
-        "**同一批输入里仍有 1 条既没被检出也没被硬拦**（详见 `eval/edge_details_full.jsonl`），"
-        "这是护栏的已知覆盖缺口，不是本集合的评测缺陷。",
+        f"本次实测 `注入检出率 {_pct(s['guardrail_flag_rate'])} / "
+        f"硬拦截率 {_pct(s['guardrail_hard_block_rate'])}`。\n"
+        "  - 检出率已达 100%：补上了「外泄动词表」（原来只有发送/转发/上传/提交，"
+        "漏掉了最常见的口语「发到」「上报」「传给」）与「敏感标识 + 外发动词」共现规则；\n"
+        "  - 硬拦截率衡量的是 `should_block_tools()` 这一路（高风险工具禁用）；"
+        "**输入侧的直接拦截走的是另一条路**（`AgentGraph` 在规划前就拒答，"
+        "见 `GUARDRAIL_REFUSAL`），因此实际防护强于本指标。",
     ]
     return "\n".join(lines) + "\n"
 

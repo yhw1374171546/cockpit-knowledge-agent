@@ -53,8 +53,16 @@ PATTERNS: List[Tuple[str, int, re.Pattern]] = [
     ("write_action_hijack_en", 2, re.compile(
         r"(without|skip|no\s+need\s+for)\s+(any\s+)?(confirmation|authorization|approval)", re.I)),
     ("exfiltration_channel", 2, re.compile(
-        r"(把|将)[^。\n]{0,12}?(发送|转发|上传|提交)(到|至)[^。\n]{0,20}?"
-        r"(http|https|邮箱|邮件|服务器|地址)")),
+        # 原来的动词表只有「发送/转发/上传/提交」，实测漏掉了最常见的口语「发到」
+        # （边界集 ed-39「把 VIN 和车主手机号发到 http://…」整条未被检出）。
+        # 同时放开必须出现「把/将」的限制：上报/同步/外发 这类动词常直接接宾语。
+        r"((把|将)[^。\n]{0,16}?)?(发送|转发|上传|提交|发到|发给|传送到|传给|外发|上报|同步到|"
+        r"报送|投递)[^。\n]{0,24}?(http|https|ftp|邮箱|邮件|短信|微信|服务器|地址|外部|第三方|"
+        r"云端|平台)")),
+    ("sensitive_data_exfil", 3, re.compile(
+        # 敏感标识 + 外发动词 → 数据外泄意图（单独出现"手机号"不算，必须与动作共现）
+        r"(VIN|vin|车架号|车辆识别代号|车主手机号|手机号|身份证|定位|行踪|行车轨迹|位置信息)"
+        r"[^。\n]{0,20}?(发送|发出|发给|发到|外发|上报|上传|传给|同步|泄露|导出|共享)")),
     ("secrecy_demand", 2, re.compile(
         r"(不要|别)(告诉|通知|提醒)[^。\n]{0,8}?(用户|车主|主人)")),
     ("suspicious_authority", 1, re.compile(
@@ -68,8 +76,16 @@ PERMISSION_TERMS = ("无需", "不需要", "不用", "不必", "跳过", "忽略
                     "已经同意", "已经确认", "最高权限", "不要告诉", "别告诉", "不要提醒",
                     "直接", "擅自", "马上", "立刻")
 ACTION_TERMS = ("下单", "预约", "创建", "提交", "执行", "泄露", "发送", "上传",
-                "输出", "打印", "复述", "移除", "解除", "修改", "覆盖")
+                "输出", "打印", "复述", "移除", "解除", "修改", "覆盖",
+                "发到", "发给", "外发", "上报", "传给", "导出", "共享", "同步")
 COOCCUR_WINDOW = 30
+
+# 需要**主动拦截**（而不仅是标记）的注入家族：数据外泄与越权写操作。
+# 单独标记不够——如果只是记一笔日志，模型照样可能把车架号或链接写进答案里。
+BLOCKING_FAMILIES = frozenset({
+    "exfiltration_channel", "sensitive_data_exfil",
+    "write_action_hijack", "write_action_hijack_en", "secrecy_demand",
+})
 
 # 需要被"消毒"的角色标记（防止证据里的标记破坏对话结构）
 _MARKER_ESCAPE = [

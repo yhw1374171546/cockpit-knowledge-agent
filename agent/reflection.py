@@ -90,7 +90,12 @@ def split_sentences(text: str) -> List[str]:
 
 
 def char_coverage(query: str, text: str, stop: Optional[set] = None) -> float:
-    """query 中实词字符被 text 覆盖的比例（轻量、无需模型）。"""
+    """query 中实词字符被 text 覆盖的比例（轻量、无需模型）。
+
+    注意：这是**字符级**信号，对**生成式**答案过苛——真实模型会把
+    「按下开关即可打开危险警告灯」改写成「开启危险警示灯需按下方向盘下方的按钮」，
+    字符重叠很低但语义完全一致。因此它现在只作为 `semantic_support()` 的兜底信号。
+    """
     stop = stop or set("的了吗呢么怎如何是有什么可以请问一下我你他这那个哪些为对能会要怎样也就都很")
     chars = {c for c in query if "\u4e00" <= c <= "\u9fff" and c not in stop}
     if not chars:
@@ -98,6 +103,97 @@ def char_coverage(query: str, text: str, stop: Optional[set] = None) -> float:
     if not chars:
         return 1.0
     return sum(1 for c in chars if c in text) / len(chars)
+
+
+# ── 语义接地（A3）────────────────────────────────────────────────────
+# 领域同义词/等价表达：生成式答案常换措辞，纯字符重叠会把它误判成"无依据"。
+SYNONYM_GROUPS = (
+    ("打开", "开启", "启用", "启动"),
+    ("关闭", "关掉", "关上", "停止", "关"),
+    ("胎压", "轮胎气压", "轮胎压力"),
+    ("显示屏", "多媒体屏", "中控屏", "中央显示屏", "触摸屏", "屏幕"),
+    ("加热", "制热", "加热功能"),
+    ("空调", "空调系统", "空调装置"),
+    ("充电", "补电", "补能"),
+    ("续航", "续航里程", "可行驶里程"),
+    ("警告", "报警", "告警", "提醒", "警示"),
+    ("故障", "故障灯", "告警灯", "警告灯"),
+    ("设置", "设定", "调节", "调整"),
+    ("立即", "马上", "尽快", "立刻"),
+    ("停车", "靠边停车", "停驶", "熄火停车"),
+    ("救援", "道路救援", "紧急救援", "联系中心"),
+    ("保养", "维护", "养护"),
+    ("里程", "公里数", "行驶里程"),
+)
+_SYNONYM_MAP: Dict[str, set] = {}
+for _group in SYNONYM_GROUPS:
+    for _word in _group:
+        _SYNONYM_MAP.setdefault(_word, set()).update(_group)
+
+GROUNDING_STOPWORDS = set(
+    "的了吗呢么怎如何是有什么可以请问一下我你他这那个哪些为对能会要怎样也就都很与及和或"
+    "请注意需要应该建议如果那么因此然后以及进行使用可能一般通常情况时候方式方法")
+
+NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
+PAGE_REF_RE = re.compile(r"第\s*\d+\s*页")
+UNIT_RE = re.compile(r"\d+(?:\.\d+)?\s*(?:kPa|kpa|KPa|千帕|V|伏|km|KM|公里|千米|℃|度|%|页)")
+
+_tokenizer_cache: Dict[str, object] = {}
+
+
+def _tokens(text: str) -> List[str]:
+    """中文分词（有 jieba 用 jieba，否则退化为按标点切分）；模块内缓存 tokenizer。"""
+    raw = (text or "").strip()
+    if not raw:
+        return []
+    if "cut" not in _tokenizer_cache:
+        try:
+            import jieba  # noqa: PLC0415
+
+            _tokenizer_cache["cut"] = jieba.cut
+        except Exception:                                      # noqa: BLE001
+            _tokenizer_cache["cut"] = None
+    cutter = _tokenizer_cache["cut"]
+    if cutter is None:
+        return [t for t in re.split(r"[^\u4e00-\u9fffA-Za-z0-9]+", raw) if t.strip()]
+    return [t for t in cutter(raw) if t.strip()]              # type: ignore[operator]
+
+
+def semantic_support(sentence: str, evidence_text: str) -> float:
+    """句子被证据支撑的程度（0~1）。
+
+    相比纯字符重叠，这里做三件事：
+    1. **数字硬核对**：句中数字若在证据里过半找不到，直接判 0（防数字幻觉，
+       例如把 236 kPa 说成 300 kPa）；
+    2. **词级重叠 + 同义词扩展**：`打开/开启`、`胎压/轮胎气压` 等视为同一含义；
+    3. **字符覆盖兜底**：短句与专有名词场景仍用字符信号。
+    """
+    s = (sentence or "").strip()
+    if not s:
+        return 1.0
+    ev = evidence_text or ""
+
+    numbers = NUMBER_RE.findall(PAGE_REF_RE.sub("", s))
+    if numbers:
+        ev_numbers = set(NUMBER_RE.findall(PAGE_REF_RE.sub("", ev)))
+        # 严格口径：**任一**数字在证据里找不到就判无依据。
+        # 理由：座舱场景里数字幻觉最危险（胎压 236→300 kPa、里程、温度阈值），
+        # 而"真数字 + 编造阈值"混在一句里是最常见的形态，宽松判定放不过去。
+        # 页码（第N页）不参与这个硬核对——它由引用校验（parse_citation）单独负责。
+        if any(n not in ev_numbers for n in numbers):
+            return 0.0
+
+    toks = [t for t in _tokens(s) if len(t) >= 2 and t not in GROUNDING_STOPWORDS]
+    if not toks:
+        return char_coverage(s, ev)
+
+    hit = 0
+    for token in toks:
+        variants = _SYNONYM_MAP.get(token, set()) | {token}
+        if token in ev or any(v in ev for v in variants):
+            hit += 1
+    token_score = hit / len(toks)
+    return round(0.8 * token_score + 0.2 * char_coverage(s, ev), 4)
 
 
 @dataclass
@@ -120,7 +216,10 @@ class ReflectionResult:
 
 class Reflector:
     def __init__(self, min_grounded_ratio: float = 0.6, min_sentence_support: float = 0.55,
-                 evidence_overlap_threshold: float = 0.12):
+                 evidence_overlap_threshold: float = 0.12, grounding: str = "semantic"):
+        # grounding="semantic"（默认）：词级重叠 + 同义词 + 数字硬核对
+        # grounding="char"：旧的纯字符重叠口径，仅用于 A/B 对比与回归定位
+        self.grounding = grounding
         self.min_grounded_ratio = min_grounded_ratio
         self.min_sentence_support = min_sentence_support
         self.evidence_overlap_threshold = evidence_overlap_threshold
@@ -149,9 +248,10 @@ class Reflector:
         joined = "\n".join(evidence_texts)
 
         sentences = split_sentences(answer)
+        scorer = semantic_support if self.grounding == "semantic" else char_coverage
         unsupported = []
         for sent in sentences:
-            support = max((char_coverage(sent, t) for t in evidence_texts), default=0.0)
+            support = max((scorer(sent, t) for t in evidence_texts), default=0.0)
             if support < self.min_sentence_support:
                 unsupported.append(sent)
         ratio = 1.0 - (len(unsupported) / len(sentences)) if sentences else 0.0
