@@ -51,5 +51,10 @@ jobs:
       - name: End-to-end smoke on mini corpus
         run: python eval/ci_smoke.py
 
+      - name: Service layer tests (FastAPI + SSE + idempotency)
+        run: |
+          pip install -r requirements-service.txt
+          python agent/tests/test_service.py
+
       - name: Metrics gate (skips missing, fails on regression)
         run: python eval/ci_gate.py

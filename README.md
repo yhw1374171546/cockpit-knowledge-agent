@@ -9,8 +9,9 @@
 ![Function Calling](https://img.shields.io/badge/Function%20Calling-5%20tools-FF6F61)
 ![LangGraph](https://img.shields.io/badge/LangGraph-StateGraph-1C3C3C)
 ![Guardrails](https://img.shields.io/badge/Guardrails-Injection%20Defense-critical)
+![Service](https://img.shields.io/badge/Service-FastAPI%20%2B%20SSE-009688)
 ![vLLM](https://img.shields.io/badge/vLLM-PagedAttention-8A2BE2)
-![Tests](https://img.shields.io/badge/tests-110%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-139%20passed-brightgreen)
 ![CI](https://img.shields.io/badge/CI-Agent%20CI-blue)
 
 **核心结果（全部在本仓库可复现，非估算）**
@@ -27,7 +28,8 @@
 | 工具过度调用率 | **100% → 7.14%** | 补上「不该调工具就不调」的判定 |
 | 首字延迟 TTFT（P50） | **614 ms → 14 ms** | 流式输出；叠加语义缓存后 < 1 ms |
 | 知识库规模 | **9,301 块 / 579 万字** | 页码元数据覆盖 **100%** |
-| 测试 | **110 passed** | 4 套离线测试，完整语料与迷你语料双模式 |
+| **服务化** | **FastAPI + SSE + 幂等落库** | 鉴权/租户/限流/配额/审计；真实 HTTP 冒烟 **33/33** |
+| 测试 | **139 passed** | 5 套测试（含 29 项服务接口测试），完整/迷你语料双模式 |
 
 ---
 
@@ -222,6 +224,7 @@ mem.resolve("那它怎么关")   # → "座椅加热 那它怎么关"（仅指�
 
 ```bash
 python agent/tests/test_offline.py     # → Ran 28 tests, OK
+python agent/tests/test_service.py     # → Ran 29 tests, OK（服务层接口）
 ```
 
 覆盖：工具 schema 合法性、检索命中性、写操作确认、重复调用抑制、**步数上限不失控**、**无进展必收敛**、拒答门控、引用真伪校验、JSON 括号不误判为引用、记忆与指代消解、**LangGraph 适配器可用性**。
@@ -272,10 +275,18 @@ python agent/tests/test_offline.py     # → Ran 28 tests, OK
 │   │   └── output_guard.py       #     输出侧泄露拦截
 │   ├── obs/tracer.py             #   ★ trace/span + 成本核算 + 失败归因
 │   ├── cache.py                  #   ★ 语义缓存（车况指纹隔离 + 反义守卫）
+│   ├── service/                  #   ★ 服务层（FastAPI + SSE + 幂等落库）
+│   │   ├── config.py             #     环境变量配置（DB/KV/JWT/限流/配额/LLM 后端）
+│   │   ├── db.py                 #     数据模型（会话/消息/工具调用/幂等/配额/审计/反馈）
+│   │   ├── kv.py                 #     KV 抽象（进程内 ↔ Redis，可降级）
+│   │   ├── auth.py               #     JWT 鉴权 + 车型租户解析
+│   │   ├── security.py           #     限流 / 配额 / 幂等 / 确认 / 审计
+│   │   ├── schemas.py            #     Pydantic 契约（自动生成 OpenAPI）
+│   │   └── app.py                #     FastAPI 应用（SSE/RBAC/健康检查/治理接口）
 │   ├── memory.py / reflection.py / graph.py / tools.py
-│   ├── run_agent.py              #   CLI（单轮 / 多轮 / 接 vLLM / LangGraph）
+│   ├── run_agent.py              #   CLI（单轮 / 多轮 / 多 Agent / 车况场景 / 接 vLLM）
 │   ├── eval_agent.py             #   103 题 Agent 评测 + 阈值扫描
-│   └── tests/                    #   4 套离线测试（110 项）
+│   └── tests/                    #   5 套测试（139 项，含服务接口测试）
 ├── kb/                           # ★ 知识库构建（三策略重建 + 页码对齐对照）
 ├── eval/                         # ★ 评测与门禁
 │   ├── evaluate.py               #   四路消融 + 检索侧指标
@@ -285,9 +296,11 @@ python agent/tests/test_offline.py     # → Ran 28 tests, OK
 │   ├── multiagent_eval.py        #   多 Agent vs 单 Agent 对比
 │   ├── ttft_bench.py             #   首字延迟 + 语义缓存
 │   ├── vector_rerank_eval.py     #   向量路 + RRF + 精排（需 GPU）
+│   ├── service_smoke.py          #   ★ 服务层真实 HTTP+SSE 冒烟（33 项检查）
 │   ├── ci_gate.py / ci_smoke.py  #   ★ 指标门禁 + 无数据冒烟
 │   ├── thresholds.json           #   ★ 门禁阈值（入库）
 │   └── fixtures/mini_corpus.jsonl #  ★ 迷你语料（入库，CI 用）
+├── requirements-service.txt      # ★ 服务层依赖（可选装）
 ├── .github/workflows/agent-ci.yml # ★ 评测门禁 CI
 ├── benchmark/                    # 异步压测 + vLLM 服务脚本
 ├── data/                         # 手册 / 测试集 / 标准答案 / 跑批结果（不入库）
@@ -622,7 +635,107 @@ python eval/ci_smoke.py     # 10/10 通过：能答 / 能拒答 / 能路由 / �
 
 ---
 
-## 十七、致谢与说明
+## 十七、服务化：从「能跑通的脚本」到「能上线的服务」
+
+前十六节解决的是**能力**问题（答得准、会分工、有护栏、可度量）；这一节解决**交付**问题——
+脚本形态没有身份、没有配额、没有幂等、没有审计，换不来线上。新增 `agent/service/`（约 1,600 行）：
+
+### 17.1 分层与职责
+
+```text
+agent/service/
+├── config.py    环境变量配置（DB / KV / JWT / 限流 / 配额 / LLM 后端）
+├── db.py        SQLAlchemy 模型：sessions / messages / tool_calls / idempotency_keys
+│                / confirmations / quotas / audit_logs / feedback / vehicles / kb_versions
+├── kv.py        KV 抽象：进程内实现（默认）↔ Redis（多实例）
+├── auth.py      JWT(HS256) 鉴权 + 车型租户解析（越权 403）
+├── security.py  限流（KV 原子计数）· 配额（按日聚合）· 幂等（落库）· 确认 · 审计
+├── schemas.py   Pydantic 契约 → 自动生成 OpenAPI
+└── app.py       FastAPI：SSE 流式 / RBAC / 健康检查 / 治理接口 / trace_id 贯穿
+```
+
+### 17.2 接口
+
+| 方法与路径 | 说明 |
+| --- | --- |
+| `POST /v1/chat` | 对话（非流式）；支持 `Idempotency-Key` 头 |
+| `POST /v1/chat/stream` | **SSE 流式**：`meta → stage → delta×N → citations → done`（含真实 TTFT） |
+| `POST /v1/sessions` · `GET /v1/sessions` | 会话创建/列表（持久化，支持续聊） |
+| `POST /v1/writes/confirm` | 写操作确认（HITL 落库，重启不丢） |
+| `GET /v1/tools` | 工具清单（OpenAI Function Calling schema） |
+| `POST /v1/feedback` | 回答反馈（闭环数据） |
+| `GET /healthz` · `GET /readyz` | 存活 / 就绪（就绪检查 DB、KV、知识库） |
+| `GET /v1/admin/audit` · `GET /v1/admin/metrics` | 审计日志 / 指标聚合（需 `service`/`admin` 角色） |
+
+### 17.3 六个"服务才需要"的设计决策
+
+1. **幂等落库，而不是内存字典**：唯一约束建在 `idempotency_keys(user_id, key)` 上，重放直接返回首次响应；
+   `tool_calls.idempotency_key` **故意不建唯一索引**——一个请求可能触发多次写，加唯一约束会插入失败
+   （这条差点写错，见 17.5）。
+2. **写操作强制 `Idempotency-Key`**：服务层把 `PolicyEngine` 的写工具策略收紧为
+   `require_idempotency_key=True`。同一套护栏，离线测试用宽松策略、对外服务用严格策略——
+   客户端"确认后重试"就不会变成重复下单。
+3. **租户标识必须 ASCII**：车型代号会出现在 `X-Vehicle-Model` 头里，而 HTTP 头不允许非 ASCII。
+   中文车型名请在网关映射为代号（`lynk08`），不要直接塞进 header。
+4. **KV 可降级、不可裸奔**：默认进程内实现（零依赖、CI 可跑），配置 Redis 自动切换；
+   文档明确写清"多实例部署必须用 Redis，否则限流/配额在每个副本各算一份"。
+5. **嵌套 session 是并发杀手**：SQLite 下 `with db.session()` 里再开一个 session 写库会直接
+   `database is locked`；统一改为 `*_in_session(session, ...)` 复用同一事务，并开启 WAL + `busy_timeout`。
+6. **流式的诚实实现**：工具决策阶段仍非流式（检索只要几毫秒），**最终生成**改走 `llm.stream_chat`
+   逐块下发，因此首字延迟是真实测得的。代价是最终答案会重新生成一次，已在代码注释与文档中写明
+   （生产可把最后一次决策改为 `tool_choice=none` 的流式调用）。
+
+### 17.4 实测（本地 `uvicorn` + 迷你语料 + 流式后端）
+
+```bash
+# 终端 A
+SERVICE_LLM_BACKEND=streaming AGENT_KB_PATH=eval/fixtures/mini_corpus.jsonl \
+    python -m uvicorn agent.service.app:app --port 8077
+# 终端 B
+python eval/service_smoke.py            # 真实 HTTP + 真实 SSE
+python agent/tests/test_service.py      # 29 项进程内接口测试（CI 用）
+```
+
+`eval/service_smoke.py` 实测 **33/33 通过**，关键几条：
+
+| 检查 | 结果 |
+| --- | --- |
+| 鉴权 / 租户 | 无令牌 401、跨车型 403 |
+| 限流 | 第 31 次请求触发 **429 + `Retry-After: 3s`** |
+| 幂等 | 重复请求 `idempotent_replay=true` 且 `message_id` 与首次一致；同 key 换 body → **422** |
+| SSE | 事件顺序 `meta→stage→delta×10→citations→done`，拼装结果与完整答案一致 |
+| **首字延迟** | **TTFT 58.0 ms vs 总耗时 280.4 ms**（服务端记录 31.9 ms） |
+| 治理 | 普通用户 403；admin 可查指标（messages=146 / tokens=114,453 / cost=$0.0234）与审计 |
+| 就绪 | `/readyz` 返回 db=true、kv=memory、kb_chunks=24 |
+
+### 17.5 这一步踩到的坑（都修了）
+
+| # | 现象 | 根因 | 修复 |
+| --- | --- | --- | --- |
+| 1 | 写操作请求报 `database is locked` | `with db.session()` 内部又开 session 写审计 | 新增 `log_in_session()` 复用同一事务；SQLite 开 WAL + busy_timeout |
+| 2 | SSE 一个 delta 都没有 | `on_delta` 传给了 `build_agent` 却没传进 `agent.run()` | `run(question, on_delta=...)` |
+| 3 | 中文车型名发请求直接异常 | HTTP 头不允许非 ASCII，租户标识用了中文 | 租户改用 ASCII 代号（`lynk08`），并在配置里写明约定 |
+| 4 | 冒烟脚本报"没有 Retry-After" | 客户端按大小写敏感取值，uvicorn 统一发小写 | 客户端改为大小写不敏感查找（HTTP 头本就大小写不敏感） |
+| 5 | 首次冒烟显示"查询后拒答" | 用 PowerShell `Invoke-RestMethod` 发中文 body 被编坏，服务端收到乱码查询 | 统一用 Python 客户端；已把这条写进 `service_smoke.py` 的注释 |
+
+> 第 5 条值得单独说：服务端行为其实**完全正确**——收到乱码查询就应该拒答。是客户端把请求搞坏了。
+> 排查时如果只看"服务返回了无答案"就会误判成服务 bug。
+
+### 17.6 与生产环境的差距（如实说明）
+
+| 项 | 当前 | 生产需要 |
+| --- | --- | --- |
+| 数据库 | SQLite（schema 兼容 PG） | PostgreSQL + Alembic 迁移 |
+| KV | 进程内（单实例） | Redis（限流/配额/缓存跨副本一致） |
+| 向量库 | FAISS 内存态（启动重建） | pgvector / Qdrant：持久化 + 增量 + 删除 |
+| 鉴权 | 本地签发 HS256 | 统一认证服务签发 + 非对称校验（JWKS） |
+| 部署 | 单进程 uvicorn | Docker Compose / K8s + 探针 + 灰度 |
+| 可观测 | 结构化日志 + 落库指标 | Prometheus + Grafana + OpenTelemetry |
+| 压测 | 未做 | Locust/k6 测 QPS 与 P95/P99 |
+
+---
+
+## 十八、致谢与说明
 
 - 语料版权归领克汽车销售有限公司所有，本项目仅用于**技术学习与研究**，仓库不含语料。
 - `qwen_generation_utils.py` 来自 Qwen 官方开源仓库；`pre_train_model/` 下模型权重来自 ModelScope / HuggingFace 开源发布。

@@ -37,6 +37,11 @@ vector_store/
 model_cache/
 *.log
 
+# ── 服务层本地数据库（SQLite + WAL，可由 db.init() 重建）──
+*.db
+*.db-wal
+*.db-shm
+
 # ── 系统 / 编辑器 ──
 .DS_Store
 Thumbs.db

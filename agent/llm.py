@@ -679,3 +679,33 @@ class RuleBasedPlannerLLM(LLMBackend):
             if m.get("role") == "assistant" and "__reflect__" in json.dumps(m, ensure_ascii=False):
                 return True
         return False
+
+
+class StreamingRulePlanner(RuleBasedPlannerLLM):
+    """规则规划器 + **逐块流式最终答案**（完全离线，用于演示与测试 SSE 传输层）。
+
+    工具调用仍由规则决策（快、确定），但最终答案按字符块吐出并带可配置时延，
+    因此能真实体现：**首字延迟 ≈ 检索耗时 + 一块的时延**，而总时长 ≈ 块数 × 时延。
+    这让"SSE 流式把 TTFT 从 X 降到 Y"成为可观测事实，而不是口号。
+    """
+
+    name = "streaming-rule-planner"
+
+    def __init__(self, ms_per_chunk: float = 40.0, chunk_size: int = 6, **kwargs):
+        super().__init__(**kwargs)
+        self.ms_per_chunk = ms_per_chunk
+        self.chunk_size = max(1, chunk_size)
+
+    def stream_chat(self, messages, tools=None, temperature=0.0, max_tokens=1024):
+        resp = self.chat(messages, tools=tools, temperature=temperature, max_tokens=max_tokens)
+        if resp.tool_calls:
+            # 决策阶段不流式：一次性交回工具调用
+            yield StreamChunk(done=True, tool_calls=resp.tool_calls)
+            return
+        text = resp.content or NO_ANSWER
+        start = time.perf_counter()
+        for i in range(0, len(text), self.chunk_size):
+            time.sleep(max(0.0, self.ms_per_chunk) / 1000.0)
+            yield StreamChunk(delta=text[i:i + self.chunk_size], done=False,
+                              elapsed_ms=(time.perf_counter() - start) * 1000)
+        yield StreamChunk(done=True, elapsed_ms=(time.perf_counter() - start) * 1000)

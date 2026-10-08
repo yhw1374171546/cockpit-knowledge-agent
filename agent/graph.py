@@ -58,6 +58,8 @@ class AgentConfig:
     # 生成前的硬门控：问题实词被最佳证据覆盖的比例低于阈值 → 直接拒答（可标定）
     evidence_gate: bool = True
     evidence_overlap_threshold: float = 0.45
+    # 服务层可注入 Idempotency-Key：写操作策略据此强制要求幂等键
+    idempotency_key: str = ""
 
 
 @dataclass
@@ -135,18 +137,50 @@ class AgentGraph:
             self.llm.set_known_tools(registry.names())
 
     # ── 对外入口 ──
-    def run(self, question: str, memory: Optional[ConversationMemory] = None) -> AgentState:
+    def run(self, question: str, memory: Optional[ConversationMemory] = None,
+            on_delta: Optional[Callable[[str], None]] = None) -> AgentState:
+        """执行一轮 Agent。
+
+        `on_delta`：传入回调即启用**流式最终生成**——工具调用循环仍走非流式
+        （决策与检索很快），最终答案改为 `llm.stream_chat` 逐块产出，用于 SSE 下发
+        与首字延迟（TTFT）测量。
+        代价说明：为拿到真实流式，最终答案会**重新生成一次**；生产可把最后一次决策改成
+        不带工具的流式调用（`tool_choice=none`）以避免重复生成。
+        """
         mem = memory or self.memory
         start = time.perf_counter()
         resolved = mem.resolve(question)
         state = AgentState(question=question, resolved_question=resolved)
         self.policy.new_turn()
+        self._on_delta = on_delta
+        self._stream_used = False
 
         with self.tracer.span("agent.run", self.agent_name, question=question[:40]) as span:
             state = self._run_inner(state, mem, resolved, start)
             span.attrs["status"] = state.status
             span.attrs["steps"] = state.steps
             return state
+
+    def _stream_final_answer(self, messages: List[Dict[str, Any]],
+                             fallback: str) -> str:
+        """用流式接口生成最终答案；失败则回退到已生成内容（不阻断请求）。"""
+        if self._on_delta is None:
+            return fallback
+        parts: List[str] = []
+        first = True
+        try:
+            for chunk in self.llm.stream_chat(messages, tools=None, temperature=0.0,
+                                              max_tokens=1024):
+                if chunk.delta:
+                    parts.append(chunk.delta)
+                    self._on_delta(chunk.delta)
+                    if first:
+                        self._stream_used = True
+                        first = False
+        except Exception:                      # noqa: BLE001 流式失败不应让请求失败
+            return fallback
+        text = "".join(parts).strip()
+        return text or fallback
 
     def _run_inner(self, state: AgentState, mem: ConversationMemory,
                    resolved: str, start: float) -> AgentState:
@@ -185,7 +219,8 @@ class AgentGraph:
 
             # ── 无工具调用：先过硬门控，再产出答案 ──
             if not response.wants_tool:
-                answer = (response.content or "").strip()
+                # 流式模式：最终答案改走 stream_chat 逐块产出（供 SSE 与 TTFT 测量）
+                answer = self._stream_final_answer(messages, (response.content or "").strip())
                 if self.config.evidence_gate and answer and answer != NO_ANSWER:
                     texts = [e.get("text", "") for e in state.evidence]
                     # 门控同时看「原始问法」与「术语改写后的问法」，取较大覆盖率：
@@ -233,7 +268,8 @@ class AgentGraph:
             progressed = False
             ctx = PolicyContext(agent=self.agent_name, turn=state.steps,
                                 injection_risk=state.injection_risk,
-                                injection_suspicious=state.injection_flagged)
+                                injection_suspicious=state.injection_flagged,
+                                idempotency_key=self.config.idempotency_key)
             t1 = time.perf_counter()
             executed = self.executor.execute(response.tool_calls, ctx, self.budget)
             state.latency_ms.setdefault("tools", 0.0)
@@ -293,7 +329,8 @@ class AgentGraph:
                                      "content": "没有更多可用信息了，请基于已有证据作答，证据不足就回答「无答案」。"})
                     response2 = self.llm.chat(messages, tools=None, temperature=0.0,
                                               max_tokens=512)
-                    answer = (response2.content or NO_ANSWER).strip()
+                    answer = self._stream_final_answer(
+                        messages, (response2.content or NO_ANSWER).strip())
                 else:
                     answer = NO_ANSWER
                 return self._finalize(state, answer, mem, start)

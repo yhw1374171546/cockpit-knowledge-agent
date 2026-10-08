@@ -36,6 +36,7 @@ class ToolPolicy:
     max_calls_per_turn: int = 3              # 单轮最多调用次数（防循环/钱包攻击）
     arg_validators: Dict[str, Callable[[Any], bool]] = field(default_factory=dict)
     require_injection_clear: bool = False    # 注入风险高时是否禁用该工具
+    require_idempotency_key: bool = False    # 写操作是否必须携带 Idempotency-Key（服务层收紧）
     roles: Sequence[str] = ("driver", "guest")
 
     def validate_args(self, args: Dict[str, Any]) -> Optional[str]:
@@ -52,11 +53,13 @@ class PolicyContext:
     injection_suspicious: bool = False
     agent: str = "agent"
     turn: int = 0
+    idempotency_key: str = ""
 
     def to_dict(self) -> Dict:
         return {"user_role": self.user_role, "injection_risk": self.injection_risk,
                 "injection_suspicious": self.injection_suspicious,
-                "agent": self.agent, "turn": self.turn}
+                "agent": self.agent, "turn": self.turn,
+                "idempotency_key": self.idempotency_key}
 
 
 @dataclass
@@ -138,6 +141,12 @@ class PolicyEngine:
             return self._log(Decision(False, needs_confirmation=True,
                                       reason=f"写操作 {tool} 需要车主确认", masked_args=masked),
                              tool, args, ctx)
+
+        # 确认之后仍要求幂等键：防止客户端"确认后重试"造成重复下单（服务层策略）
+        if policy.require_idempotency_key and not ctx.idempotency_key:
+            return self._log(Decision(False,
+                                      reason=f"写操作 {tool} 必须携带 Idempotency-Key（防重复提交）",
+                                      masked_args=masked), tool, args, ctx)
 
         return self._log(Decision(True, masked_args=masked), tool, args, ctx)
 

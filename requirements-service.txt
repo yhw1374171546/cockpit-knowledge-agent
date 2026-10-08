@@ -1,0 +1,17 @@
+# Agent 服务层依赖（P0 第一步：FastAPI + SSE 流式 + 幂等落库）
+#
+# 安装：pip install -r requirements-service.txt
+#
+# 说明：
+# - 这些依赖**只有服务层需要**；离线 Agent 链路与 110 项单测仍只用标准库 + 可选 jieba。
+# - `redis` 为可选：装了并在 SERVICE_KV_BACKEND=redis + SERVICE_REDIS_URL 时启用，
+#   否则自动降级为进程内实现（多实例部署必须用 Redis，见 README 服务化章节）。
+fastapi>=0.110
+uvicorn>=0.27
+sqlalchemy>=2.0
+pyjwt>=2.8
+httpx>=0.27
+
+# 可选（生产多实例）
+# redis>=5.0
+# psycopg[binary]>=3.1      # PostgreSQL 驱动：SERVICE_DATABASE_URL=postgresql+psycopg://...
