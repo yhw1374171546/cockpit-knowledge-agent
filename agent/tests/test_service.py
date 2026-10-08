@@ -27,7 +27,7 @@ from agent.service.app import _load_history, create_app                     # no
 from agent.service.config import Settings                                   # noqa: E402
 from agent.service.db import SessionRow, ToolCallRow                        # noqa: E402
 from agent.service.security import IdempotencyStore                         # noqa: E402
-from agent.tools import ToolRegistry                                        # noqa: E402
+from agent.tools import ToolRegistry, build_default_registry                 # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 FIXTURE = os.path.join(ROOT, "eval", "fixtures", "mini_corpus.jsonl")
@@ -410,6 +410,33 @@ class TestAdmin(ServiceTestBase):
         self.assertGreater(metrics["tokens_total"], 0)
         self.assertIn("failure_distribution", metrics)
         self.assertEqual(metrics["kv_backend"], "memory")
+
+
+class TestRegistryReuse(ServiceTestBase):
+    """锁死一个性能 bug：服务层曾每请求重建知识库索引。
+
+    实测（9301 块）：`KnowledgeBase.load` ≈14.6 s、`build_default_registry` ≈16.3 s，
+    而单次 BM25 检索只要 ≈12 ms——即每请求白花十几秒，压测 QPS 只有 0.06。
+    这里用"对象同一性"来断言注册表复用了运行时缓存，而不是靠计时（CI 上计时不稳定）。
+    """
+
+    def test_registry_reuses_cached_kb(self):
+        runtime = self.app.state.runtime
+        kb = runtime.kb(self.settings.default_vehicle_model)
+        registry = build_default_registry(self.settings.kb_path or None, kb=kb)
+        self.assertIs(registry.kb, kb, "注册表没有复用缓存的知识库实例（会每请求重建索引）")
+
+    def test_build_agent_reuses_cached_kb(self):
+        runtime = self.app.state.runtime
+        kb = runtime.kb(self.settings.default_vehicle_model)
+        agent, _tracer, registry = runtime.build_agent(self.settings.default_vehicle_model)
+        self.assertIs(registry.kb, kb, "build_agent 没有复用缓存的知识库实例")
+
+    def test_two_registries_share_same_kb(self):
+        runtime = self.app.state.runtime
+        _a, _, reg_a = runtime.build_agent(self.settings.default_vehicle_model)
+        _b, _, reg_b = runtime.build_agent(self.settings.default_vehicle_model)
+        self.assertIs(reg_a.kb, reg_b.kb, "两次构建拿到了不同的 KB 实例（缓存未命中）")
 
 
 class TestSessionIsolation(ServiceTestBase):

@@ -15,11 +15,14 @@
 | 冲突处理 | 无仲裁 | 显式优先级仲裁 + 升级人工 |
 | 延迟 | 串行 | 并行 fan-out（I/O 型工具才有收益） |
 
-用法：python eval/multiagent_eval.py
+用法：
+    python eval/multiagent_eval.py                    # 离线规则替身（默认，CI 基线）
+    python eval/multiagent_eval.py --provider deepseek   # 真实云端模型
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import statistics
@@ -28,21 +31,25 @@ from typing import Any, Dict, List, Sequence
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from eval.llm_backend import (add_llm_args, backend_fields, cost_line,  # noqa: E402
+                              llm_id, llm_label, make_llm)
 from eval.multiagent_set import TELEMETRY_PROFILES, load_cases    # noqa: E402
 
 from agent.kb import KnowledgeBase                                # noqa: E402
+from agent.llm import redact                                      # noqa: E402
 from agent.memory import ConversationMemory, VehicleProfile       # noqa: E402
 from agent.obs import Tracer                                      # noqa: E402
 from agent.orchestrator import Supervisor                         # noqa: E402
 from agent.protocols import SAFETY_DIRECTIVES, risk_at_least      # noqa: E402
+from agent.tools import ToolRegistry                              # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT_JSON = os.path.join(ROOT, "eval", "multiagent_metrics.json")
 OUT_MD = os.path.join(ROOT, "eval", "multiagent_report.md")
 
 
-def run_multi(kb, case: Dict, tracer: Tracer) -> Dict[str, Any]:
-    sup = Supervisor(kb, tracer=tracer, telemetry=TELEMETRY_PROFILES[case["telemetry"]])
+def run_multi(kb, case: Dict, tracer: Tracer, llm=None) -> Dict[str, Any]:
+    sup = Supervisor(kb, llm, tracer=tracer, telemetry=TELEMETRY_PROFILES[case["telemetry"]])
     state = sup.run(case["query"], memory=ConversationMemory(profile=VehicleProfile()))
     agents = {r.agent for r in state.results}
     answer = state.answer or ""
@@ -70,9 +77,9 @@ def run_multi(kb, case: Dict, tracer: Tracer) -> Dict[str, Any]:
     }
 
 
-def run_single(kb, case: Dict, tracer: Tracer) -> Dict[str, Any]:
+def run_single(kb, case: Dict, tracer: Tracer, llm=None) -> Dict[str, Any]:
     """单 Agent 基线：同一个 LLM 后端 + 全部 5 个工具 + 同样的护栏与 trace。"""
-    sup = Supervisor(kb, tracer=tracer, telemetry=TELEMETRY_PROFILES[case["telemetry"]])
+    sup = Supervisor(kb, llm, tracer=tracer, telemetry=TELEMETRY_PROFILES[case["telemetry"]])
     state = sup.run_baseline(case["query"], memory=ConversationMemory(profile=VehicleProfile()))
     answer = state.answer or ""
     called = [t["tool"] for t in state.tool_calls]
@@ -94,14 +101,31 @@ def pct(rows: Sequence[Dict], pred) -> float:
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    add_llm_args(ap)
+    ap.add_argument("--json-out", default=OUT_JSON)
+    ap.add_argument("--md-out", default=OUT_MD)
+    args = ap.parse_args()
+
     print("[info] 加载知识库…", flush=True)
     kb = KnowledgeBase.load()
     cases = load_cases()
     tracer = Tracer()
     print(f"[info] 样本 {len(cases)} 条（single/multi/safety/conflict 四类）")
 
-    multi = [run_multi(kb, c, tracer) for c in cases]
-    single = [run_single(kb, c, tracer) for c in cases]
+    if args.provider == "planner":
+        # 默认离线基线：llm=None，专家各自用 ScopedPlanner（行为与 CI 基线完全一致）
+        llm = None
+    else:
+        try:
+            llm = make_llm(args, known_tools=ToolRegistry(kb).names())
+        except RuntimeError as exc:
+            print(f"[错误] {redact(exc)}")
+            return 2
+    print(f"[info] LLM 后端: {llm_id(args)} —— {llm_label(args)}")
+
+    multi = [run_multi(kb, c, tracer, llm) for c in cases]
+    single = [run_single(kb, c, tracer, llm) for c in cases]
 
     safety_cases = [c for c in cases if c["kind"] in ("safety", "conflict")]
     conflict_cases = [c for c in cases if c["expect_conflict"]]
@@ -135,12 +159,16 @@ def main():
             "avg_tokens": round(statistics.mean([r["tokens"] for r in s_all]), 1),
         },
     }
+    # 本次使用的后端标识与成本账本（离线替身为 planner / $0）
+    summary.update(backend_fields(args, llm))
     json.dump({"summary": summary, "multi": multi, "single": single},
-              open(OUT_JSON, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+              open(args.json_out, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 
     md = [
         "# 多 Agent vs 单 Agent 对比评测（自动生成）\n",
         f"- 样本：{len(cases)} 条（单意图 8 / 多意图 8 / 安全关键 4 / 冲突 4）",
+        f"- 模型后端：`{llm_id(args)}` —— {llm_label(args)}",
+        cost_line(summary),
         "- 两个系统使用**同一个 LLM 后端、同一套护栏与 trace**，唯一差别是编排方式\n",
         "## 1. 核心对比\n",
         "| 指标 | 单 Agent（全工具） | 多 Agent（Supervisor+专家） |",
@@ -195,9 +223,9 @@ def main():
         "- **适用判断**：座舱这类「有写操作 + 有安全红线 + 有实时数据」的场景值得上多 Agent；"
         "纯问答场景单 Agent 更省。",
     ]
-    open(OUT_MD, "w", encoding="utf-8").write("\n".join(md) + "\n")
+    open(args.md_out, "w", encoding="utf-8").write("\n".join(md) + "\n")
     print("\n" + "\n".join(md))
-    print(f"\n[json] {OUT_JSON}\n[md] {OUT_MD}")
+    print(f"\n[json] {args.json_out}\n[md] {args.md_out}")
 
 
 if __name__ == "__main__":

@@ -11,9 +11,10 @@
 5. **开销**：单题平均总耗时与分段耗时（LLM 决策 / 工具 / 反思），即编排层额外开销。
 
 用法：
-    python -m agent.eval_agent                 # 全量 103 题
+    python -m agent.eval_agent                 # 全量 103 题（离线规则替身，默认）
     python -m agent.eval_agent --limit 20      # 快速验证
     python -m agent.eval_agent --no-rewrite    # 关闭查询改写做消融
+    python -m agent.eval_agent --provider deepseek   # 换成真实云端模型
 """
 
 from __future__ import annotations
@@ -28,9 +29,12 @@ from typing import Dict, List
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from eval.llm_backend import (add_llm_args, backend_fields, cost_line,  # noqa: E402
+                              llm_id, llm_label, make_llm)
+
 from agent.graph import AgentConfig, AgentGraph              # noqa: E402
 from agent.kb import KnowledgeBase                           # noqa: E402
-from agent.llm import RuleBasedPlannerLLM                    # noqa: E402
+from agent.llm import redact                                 # noqa: E402
 from agent.memory import ConversationMemory, VehicleProfile   # noqa: E402
 from agent.reflection import NO_ANSWER, Reflector            # noqa: E402
 from agent.tools import ToolRegistry                         # noqa: E402
@@ -61,10 +65,14 @@ def load_cases(limit: int = 0):
     return cases[:limit] if limit else cases
 
 
-def make_agent(kb, threshold: float, rewrite: bool) -> AgentGraph:
+def make_agent(kb, threshold: float, rewrite: bool, llm) -> AgentGraph:
     registry = ToolRegistry(kb)
-    planner = RuleBasedPlannerLLM(overlap_threshold=threshold)
-    planner.rewrite_enabled = rewrite
+    planner = llm
+    # 规则替身用 overlap_threshold / rewrite_enabled 控制决策；真实模型没有这两个旋钮
+    if hasattr(planner, "overlap_threshold"):
+        planner.overlap_threshold = threshold
+    if hasattr(planner, "rewrite_enabled"):
+        planner.rewrite_enabled = rewrite
     reflector = Reflector(evidence_overlap_threshold=threshold)
     config = AgentConfig(max_steps=6, evidence_gate=threshold > 0,
                          evidence_overlap_threshold=threshold)
@@ -75,8 +83,8 @@ def make_agent(kb, threshold: float, rewrite: bool) -> AgentGraph:
                       config=config)
 
 
-def run_suite(kb, cases, threshold: float, rewrite: bool = True) -> Dict:
-    agent = make_agent(kb, threshold, rewrite)
+def run_suite(kb, cases, threshold: float, rewrite: bool = True, llm=None) -> Dict:
+    agent = make_agent(kb, threshold, rewrite, llm)
     rows = []
     started = time.perf_counter()
     for case in cases:
@@ -145,6 +153,7 @@ def run_suite(kb, cases, threshold: float, rewrite: bool = True) -> Dict:
 
 def main():
     ap = argparse.ArgumentParser()
+    add_llm_args(ap)
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--threshold", type=float, default=0.40)
     ap.add_argument("--sweep", default="0.30,0.40,0.45,0.50,0.55,0.60",
@@ -159,6 +168,14 @@ def main():
     kb = KnowledgeBase.load()
     print(f"[info] 知识库: {json.dumps(kb.stats(), ensure_ascii=False)}")
 
+    try:
+        # 整个评测（阈值扫描 + 消融）复用同一个 LLM 实例：成本账本才能累计成总花费
+        llm = make_llm(args)
+    except RuntimeError as exc:
+        print(f"[错误] {redact(exc)}")
+        return 2
+    print(f"[info] LLM 后端: {llm_id(args)} —— {llm_label(args)}")
+
     cases = load_cases(args.limit)
     print(f"[info] 测试集 {len(cases)} 题（负样本 {sum(1 for c in cases if c['is_negative'])}）")
 
@@ -166,7 +183,7 @@ def main():
     sweep = []
     main_result = None
     for t in thresholds:
-        res = run_suite(kb, cases, t, rewrite=not args.no_rewrite)
+        res = run_suite(kb, cases, t, rewrite=not args.no_rewrite, llm=llm)
         s = res["summary"]
         sweep.append({k: s[k] for k in ("threshold", "refusal_accuracy", "false_refusal",
                                         "context_recall", "avg_steps", "avg_tools")})
@@ -178,7 +195,7 @@ def main():
     # 查询改写消融
     rewrite_ablation = None
     if not args.no_rewrite:
-        res_no = run_suite(kb, cases, args.threshold, rewrite=False)
+        res_no = run_suite(kb, cases, args.threshold, rewrite=False, llm=llm)
         rewrite_ablation = {
             "with_rewrite": main_result["summary"]["context_recall"],
             "without_rewrite": res_no["summary"]["context_recall"],
@@ -204,6 +221,8 @@ def main():
     out = {"summary": main_result["summary"], "sweep": sweep,
            "rewrite_ablation": rewrite_ablation, "baseline_pipeline": baseline,
            "kb_stats": kb.stats()}
+    # 本次使用的后端标识与成本账本（离线替身为 planner / $0）
+    out["summary"].update(backend_fields(args, llm))
     json.dump(out, open(args.json_out, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
     with open(args.detail_out, "w", encoding="utf-8") as f:
         for row in main_result["rows"]:
@@ -214,7 +233,8 @@ def main():
              f"- 知识库：{s['n']} 题测试 ｜ 块数 {kb.stats()['n_chunks']} ｜ "
              f"分词后端 {kb.stats()['tokenizer']} ｜ 向量路 {'开启' if kb.stats()['has_vector'] else '未开启'}",
              f"- 编排：原生状态机（Router→Planner→Tool→Reflect→Answer），max_steps=6",
-             f"- 规划器：RuleBasedPlannerLLM（离线替身，衡量编排与检索，不衡量生成质量）\n",
+             f"- 模型后端：`{llm_id(args)}` —— {llm_label(args)}",
+             cost_line(s) + "\n",
              "## 1. 总体指标\n",
              "| 指标 | 数值 | 对照 |", "| --- | --- | --- |",
              f"| 拒答准确率（负样本） | {s['refusal_accuracy']} | 原链路 0/2（信号未接入答案侧） |",

@@ -106,8 +106,9 @@ class AgentRuntime:
                     history: Optional[List[Tuple[str, str]]] = None
                     ) -> Tuple[AgentGraph, Tracer, ToolRegistry]:
         kb = self.kb(vehicle_model)
-        registry = build_default_registry(self.settings.kb_path or None)
-        registry.kb = kb
+        # 把**已缓存的 kb** 传进去：否则这里会从磁盘重新加载并重建 BM25 索引
+        # （9301 块实测 ≈16 s/次，而单次检索只要 ≈12 ms），缓存就白做了。
+        registry = build_default_registry(self.settings.kb_path or None, kb=kb)
         if confirmed:
             registry.confirmed_actions |= set(confirmed)
         tracer = Tracer()
@@ -269,8 +270,12 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     # ── 工具清单 ──
     @app.get("/v1/tools", response_model=List[ToolInfo], tags=["agent"],
               summary="列出可用工具（OpenAI Function Calling schema）")
-    async def tools(request: Request, principal: Principal = Depends(principal_of)):
-        registry = build_default_registry(settings.kb_path or None)
+    async def tools(request: Request, principal: Principal = Depends(principal_of),
+                    x_vehicle_model: Optional[str] = Header(None)):
+        # 复用运行时缓存的知识库（不要在这里重新加载：9301 块 ≈16 s）
+        model = settings.default_vehicle_model
+        kb = _runtime(request).kb(model)
+        registry = build_default_registry(settings.kb_path or None, kb=kb)
         return [ToolInfo(name=s["function"]["name"], description=s["function"]["description"],
                          parameters=s["function"]["parameters"]) for s in registry.specs()]
 

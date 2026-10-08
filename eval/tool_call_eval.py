@@ -3,11 +3,12 @@
 
 两种后端
 ------
-- `--backend planner`（默认，离线）：规则规划器 + **脏参数注入**。
+- `--provider planner`（默认，离线）：规则规划器 + **脏参数注入**。
   它衡量的是 **FC 管线健壮性**（参数修复、策略裁决、并行执行、观察回填），
   以及在规则基线下的行为一致性；**不代表真实模型的工具调用能力**。
-- `--backend openai`：接真实 LLM（vLLM / 任意 OpenAI 兼容服务），
+- `--provider deepseek`（或 deepseek-pro / openai / vllm）：接真实 LLM，
   得到的就是可以写进简历的真实 Function Calling 指标。
+  （旧参数 `--backend openai` 仍兼容，等价于 `--provider vllm`。）
 
 指标口径
 ------
@@ -34,13 +35,14 @@ from typing import Any, Dict, List, Optional, Sequence
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from eval.llm_backend import (add_llm_args, backend_fields, cost_line,  # noqa: E402
+                              llm_id, llm_label, make_llm)
 from eval.tool_call_set import load_cases                             # noqa: E402
 
 from agent.executor import ToolExecutor                              # noqa: E402
 from agent.guardrails import PolicyContext                           # noqa: E402
 from agent.kb import KnowledgeBase                                   # noqa: E402
-from agent.llm import (OpenAICompatibleLLM, RuleBasedPlannerLLM,     # noqa: E402
-                       ToolCall)
+from agent.llm import RuleBasedPlannerLLM, ToolCall, redact          # noqa: E402
 from agent.obs import Tracer                                         # noqa: E402
 from agent.tools import ToolRegistry                                 # noqa: E402
 
@@ -116,7 +118,8 @@ def run_case(case: Dict[str, Any], llm, registry: ToolRegistry, repair,
         messages.append({"role": "assistant", "content": None,
                          "tool_calls": [c.to_openai() for c in real]})
         for item in executed:
-            messages.append({"role": "tool", "name": item.call.name,
+            messages.append({"role": "tool", "tool_call_id": item.call.id,
+                             "name": item.call.name,
                              "content": item.result.to_observation()[:800]})
 
     called = []
@@ -154,13 +157,20 @@ def run_case(case: Dict[str, Any], llm, registry: ToolRegistry, repair,
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--backend", choices=["planner", "openai"], default="planner")
-    ap.add_argument("--base-url", default="http://127.0.0.1:8000/v1")
-    ap.add_argument("--model", default="Qwen2_5_7B_Instruct")
+    add_llm_args(ap)
+    ap.add_argument("--backend", choices=["planner", "openai"], default=None,
+                    help="已废弃：等价于 --provider planner / --provider vllm（保留兼容）")
     ap.add_argument("--dirty-ratio", type=float, default=0.3,
                     help="规则规划器下注入脏参数的比例（压测 FC 修复链路）")
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--json-out", default=OUT_JSON)
+    ap.add_argument("--md-out", default=OUT_MD)
     args = ap.parse_args()
+    # 旧参数兼容：--backend openai 的语义就是"OpenAI 兼容服务"，即 provider=vllm
+    if args.backend == "planner":
+        args.provider = "planner"
+    elif args.backend == "openai" and args.provider == "planner":
+        args.provider = "vllm"
 
     print("[info] 加载知识库…", flush=True)
     kb = KnowledgeBase.load()
@@ -168,11 +178,15 @@ def main():
     tracer = Tracer()
     executor = ToolExecutor(registry, tracer=tracer, parallel=True)
 
-    if args.backend == "openai":
-        llm = OpenAICompatibleLLM(base_url=args.base_url, model=args.model,
-                                 known_tools=registry.names())
-    else:
+    if args.provider == "planner":
+        # 默认离线基线：规则规划器 + 脏参数注入（口径与 CI 基线完全一致）
         llm = DirtyPlanner(registry.names(), dirty_ratio=args.dirty_ratio)
+    else:
+        try:
+            llm = make_llm(args, known_tools=registry.names())
+        except RuntimeError as exc:
+            print(f"[错误] {redact(exc)}")
+            return 2
     repair = getattr(llm, "repair", None)
     if repair is None:
         from agent.llm import ToolCallRepair
@@ -192,7 +206,6 @@ def main():
     parse_fail = sum(r["parse_failures"] for r in rows)
 
     summary = {
-        "backend": args.backend,
         "n_cases": n,
         "tool_selection_accuracy": rate(lambda r: r["exact_match"]),
         "tool_recall": round(sum(r["tool_recall"] for r in rows) / n, 4),
@@ -212,15 +225,18 @@ def main():
             for cat in sorted({r["category"] for r in rows})
         },
     }
+    # 本次使用的后端标识与成本账本（离线替身为 planner / $0）
+    summary.update(backend_fields(args, llm))
     json.dump({"summary": summary, "rows": rows},
-              open(OUT_JSON, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+              open(args.json_out, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
 
     md = [
         "# Function Calling 评测报告（自动生成）\n",
         f"- 评测集：{n} 条（should_call / multi_tool / write_guard / should_not_call 四类）",
-        f"- 后端：`{args.backend}`"
-        + ("（离线规则规划器 + 脏参数注入）" if args.backend == "planner"
-           else "（真实 LLM，OpenAI 兼容接口）"),
+        f"- 后端：`{llm_id(args)}` —— {llm_label(args)}"
+        + ("（离线规则规划器 + 脏参数注入）" if args.provider == "planner"
+           else "（真实模型，OpenAI 兼容接口）"),
+        cost_line(summary),
         f"- 知识库工具数：{len(registry.names())}\n",
         "## 1. 总体指标\n",
         "| 指标 | 数值 | 说明 |", "| --- | --- | --- |",
@@ -240,12 +256,13 @@ def main():
         "\n## 3. 口径说明（重要）\n",
         "- 离线 `planner` 后端衡量的是 **FC 管线健壮性**（参数修复、策略裁决、并行执行、"
         "观察回填）与规则基线的一致性，**不代表真实模型的工具调用能力**；",
-        "- 要拿到可写进简历的真实模型指标，请在 vLLM 起服务后执行：\n",
+        "- 要拿到真实模型的工具调用指标，执行：\n",
         "```bash",
-        "python -m eval.tool_call_eval --backend openai --base-url http://127.0.0.1:8000/v1",
+        "python eval/tool_call_eval.py --provider deepseek      # 云端真实模型",
+        "python eval/tool_call_eval.py --provider vllm --base-url http://127.0.0.1:8000/v1",
         "```",
     ]
-    open(OUT_MD, "w", encoding="utf-8").write("\n".join(md) + "\n")
+    open(args.md_out, "w", encoding="utf-8").write("\n".join(md) + "\n")
     print("\n" + "\n".join(md))
 
     if args.verbose:
@@ -253,7 +270,7 @@ def main():
         for r in rows:
             flag = "OK " if r["exact_match"] else "DIFF"
             print(f"  [{flag}] {r['id']} 期望={r['expected_tools']} 实调={r['called_tools']}  {r['query'][:24]}")
-    print(f"\n[json] {OUT_JSON}\n[md] {OUT_MD}")
+    print(f"\n[json] {args.json_out}\n[md] {args.md_out}")
 
 
 if __name__ == "__main__":
