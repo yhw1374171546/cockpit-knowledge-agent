@@ -1,0 +1,27 @@
+# Prometheus 抓取配置：每 10 秒抓一次 Agent 服务指标
+#
+# 注意：指标计数器是**进程内**的。若用 `uvicorn --workers 4`，每个 worker 各有一份，
+# 标准做法是让 Prometheus 分别抓取（或用多个容器副本，各自被服务发现发现），
+# 在查询时用 sum by (...) 聚合——不要在应用内试图合并。
+global:
+  scrape_interval: 10s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: cockpit-agent
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["api:8077"]
+        labels:
+          service: cockpit-agent
+          env: local
+
+  # 横向扩容示例：多副本时一并抓取（各副本各有一份进程内计数）
+  # - job_name: cockpit-agent-replicas
+  #   metrics_path: /metrics
+  #   static_configs:
+  #     - targets: ["api-1:8077", "api-2:8077"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

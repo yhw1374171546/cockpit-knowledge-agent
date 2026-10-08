@@ -93,13 +93,22 @@ class QuotaService:
 
     def record(self, user_id: str, tokens: int, cost_usd: float = 0.0) -> QuotaResult:
         with self.db.session() as session:
-            row = self._row(session, user_id)
-            row.tokens_used = int(row.tokens_used or 0) + max(0, tokens)
-            row.cost_usd = float(row.cost_usd or 0.0) + max(0.0, cost_usd)
-            row.requests = int(row.requests or 0) + 1
-            limit = self.settings.quota_tokens_per_day
-            return QuotaResult(True, int(row.tokens_used), limit,
-                               max(0, limit - int(row.tokens_used)))
+            return self.record_in_session(session, user_id, tokens, cost_usd)
+
+    def record_in_session(self, session, user_id: str, tokens: int,
+                          cost_usd: float = 0.0) -> QuotaResult:
+        """在**已有事务**里记账 —— 写路径优化：把每请求 4 次写事务压成 1 次。
+
+        SQLite 只允许一个写者，事务数直接决定并发下的排队长度（压测实测 QPS 随并发下降、
+        P99 从 25 ms 爆到 1667 ms）。
+        """
+        row = self._row(session, user_id)
+        row.tokens_used = int(row.tokens_used or 0) + max(0, tokens)
+        row.cost_usd = float(row.cost_usd or 0.0) + max(0.0, cost_usd)
+        row.requests = int(row.requests or 0) + 1
+        limit = self.settings.quota_tokens_per_day
+        return QuotaResult(True, int(row.tokens_used), limit,
+                           max(0, limit - int(row.tokens_used)))
 
 
 # ── 幂等（落库唯一约束）──────────────────────────────────────────────
@@ -163,15 +172,20 @@ class IdempotencyStore:
 
     def complete(self, user_id: str, key: str, response: Dict[str, Any]) -> None:
         with self.db.session() as session:
-            row = session.execute(
-                select(IdempotencyKey).where(IdempotencyKey.user_id == user_id,
-                                             IdempotencyKey.key == key)
-            ).scalar_one_or_none()
-            if row is None:
-                return
-            row.status = "completed"
-            row.response_body = json.dumps(response, ensure_ascii=False, default=str)
-            row.completed_at = datetime.utcnow()
+            self.complete_in_session(session, user_id, key, response)
+
+    def complete_in_session(self, session, user_id: str, key: str,
+                            response: Dict[str, Any]) -> None:
+        """在**已有事务**里标记幂等完成并写回响应（供重放返回同一结果）。"""
+        row = session.execute(
+            select(IdempotencyKey).where(IdempotencyKey.user_id == user_id,
+                                         IdempotencyKey.key == key)
+        ).scalar_one_or_none()
+        if row is None:
+            return
+        row.status = "completed"
+        row.response_body = json.dumps(response, ensure_ascii=False, default=str)
+        row.completed_at = datetime.utcnow()
 
     def release(self, user_id: str, key: str) -> None:
         """请求失败时释放幂等键，避免用户被永久卡住。"""

@@ -439,6 +439,87 @@ class TestRegistryReuse(ServiceTestBase):
         self.assertIs(reg_a.kb, reg_b.kb, "两次构建拿到了不同的 KB 实例（缓存未命中）")
 
 
+class TestDegradationAndMetrics(unittest.TestCase):
+    """故障注入 → 降级链；以及 Prometheus 指标端点。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _client(self, **overrides):
+        settings = make_settings(self._tmp.name, **overrides)
+        app = create_app(settings)
+        # raise_server_exceptions=False：让"未降级时的 5xx"以响应返回，而不是在测试里抛出
+        ctx = TestClient(app, raise_server_exceptions=False)
+        client = ctx.__enter__()
+        token = client.post("/v1/auth/token",
+                            json={"user_id": "u1", "vehicle_model": "lynk08"}).json()["access_token"]
+        return ctx, client, {"Authorization": f"Bearer {token}"}
+
+    def test_llm_failure_falls_back_to_offline_planner(self):
+        """主推理后端全挂 → 仍返回 200，但标记 degraded（座舱不至于彻底失能）。"""
+        ctx, client, headers = self._client(fault_mode="error", enable_degradation=True)
+        try:
+            body = client.post("/v1/chat", json={"message": "座椅加热怎么关闭"},
+                               headers=headers).json()
+            self.assertEqual(body["status"], "answered", body)
+            self.assertTrue(body["degraded"], "没有标记降级")
+            self.assertIn("注入故障", body["degrade_reason"])
+        finally:
+            ctx.__exit__(None, None, None)
+
+    def test_without_degradation_fault_returns_5xx(self):
+        """关掉降级链 → 注入故障应当直接失败（说明降级确实在起作用）。"""
+        ctx, client, headers = self._client(fault_mode="error", enable_degradation=False)
+        try:
+            resp = client.post("/v1/chat", json={"message": "座椅加热怎么关闭"},
+                               headers=headers)
+            self.assertGreaterEqual(resp.status_code, 500)
+        finally:
+            ctx.__exit__(None, None, None)
+
+    def test_metrics_endpoint_requires_privilege_by_default(self):
+        ctx, client, headers = self._client()
+        try:
+            self.assertEqual(client.get("/metrics", headers=headers).status_code, 403)
+            admin = client.post("/v1/auth/token",
+                                json={"user_id": "a", "role": "admin",
+                                      "vehicle_model": "lynk08"}).json()["access_token"]
+            resp = client.get("/metrics", headers={"Authorization": f"Bearer {admin}"})
+            self.assertEqual(resp.status_code, 200)
+            text = resp.text
+            for metric in ("agent_up", "agent_http_requests_total",
+                           "agent_request_duration_seconds_bucket",
+                           "agent_tokens_total", "agent_tool_calls_total"):
+                self.assertIn(metric, text, f"指标缺失：{metric}")
+        finally:
+            ctx.__exit__(None, None, None)
+
+    def test_metrics_public_mode(self):
+        ctx, client, _headers = self._client(metrics_public=True)
+        try:
+            resp = client.get("/metrics")
+            self.assertEqual(resp.status_code, 200)
+            self.assertIn("agent_up", resp.text)
+        finally:
+            ctx.__exit__(None, None, None)
+
+    def test_metrics_count_refusals_and_tool_calls(self):
+        ctx, client, headers = self._client(metrics_public=True)
+        try:
+            client.post("/v1/chat", json={"message": "座椅加热怎么关闭"}, headers=headers)
+            client.post("/v1/chat", json={"message": "中国足球的队长是谁"}, headers=headers)
+            text = client.get("/metrics").text
+            self.assertIn('agent_refusals_total{instance=', text)
+            # 标签按字典序渲染，所以只断言键值对本身
+            self.assertIn('tool="search_manual"', text)
+            self.assertIn("agent_tokens_total", text)
+        finally:
+            ctx.__exit__(None, None, None)
+
+
 class TestSessionIsolation(ServiceTestBase):
     def test_other_user_cannot_use_session(self):
         sid = self.chat("座椅加热怎么关闭").json()["session_id"]

@@ -1,0 +1,142 @@
+# ── 座舱 Agent 服务：一键起全栈 ──
+#
+# 用途：把「本机 SQLite + 进程内 KV」换成**生产形态**（PostgreSQL + Redis），
+# 并顺带拉起 Prometheus/Grafana 观测栈与 vLLM 推理服务。
+#
+#   docker compose up -d                      # 起 api + postgres + redis
+#   docker compose --profile obs up -d        # 再加 Prometheus + Grafana
+#   docker compose --profile llm up -d        # 再起 vLLM 推理容器（需要 GPU）
+#   docker compose exec api python eval/service_smoke.py
+#
+# 说明：本机没有 Docker，所以这套编排**未做过本地实跑验证**——但它把「生产需要哪些组件、
+# 各自的连接方式与环境变量」写成了可执行文档；这也是 Iac（基础设施即代码）该有的样子。
+# 关键点：SQLite→PostgreSQL、进程内 KV→Redis，正是压测定位出来的两个瓶颈对应项。
+
+name: cockpit-agent
+
+services:
+  # ── 应用服务 ──
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.service
+    image: cockpit-agent-api:latest
+    ports:
+      - "8077:8077"
+    environment:
+      # 存储：PostgreSQL（并发写；SQLite 单写者是压测定位到的容量天花板）
+      SERVICE_DATABASE_URL: postgresql+psycopg://agent:agent@postgres:5432/agent
+      # KV：Redis（多副本共享限流/配额；进程内实现会在每个副本各算一份）
+      SERVICE_KV_BACKEND: redis
+      SERVICE_REDIS_URL: redis://redis:6379/0
+      # 鉴权与配额
+      SERVICE_JWT_SECRET: ${SERVICE_JWT_SECRET:-change-me-in-production}
+      SERVICE_DEV_TOKEN: "0"
+      SERVICE_QUOTA_TOKENS_PER_DAY: "200000"
+      # 推理后端：默认连 vllm 容器；没有 GPU 时可改成 planner 走离线降级链路
+      SERVICE_LLM_BACKEND: ${SERVICE_LLM_BACKEND:-planner}
+      SERVICE_LLM_BASE_URL: http://vllm:8000/v1
+      SERVICE_LLM_MODEL: ${SERVICE_LLM_MODEL:-Qwen2_5_7B_Instruct}
+      # 降级与指标
+      SERVICE_ENABLE_DEGRADATION: "1"
+      SERVICE_METRICS_PUBLIC: "1"          # 容器内网暴露，便于 Prometheus 抓取
+      AGENT_KB_PATH: /data/kb/chunks.jsonl
+    volumes:
+      - ./kb:/data/kb:ro                   # 语料只读挂载（不入镜像）
+      - ./eval:/app/eval                   # 便于容器内跑冒烟脚本
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8077/readyz',timeout=4).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
+    restart: unless-stopped
+
+  # ── 数据库 ──
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD: agent
+      POSTGRES_DB: agent
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent -d agent"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # ── 缓存 / 限流 / 幂等锁 ──
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # ── 可观测（可选）──
+  prometheus:
+    image: prom/prometheus:latest
+    profiles: ["obs"]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - promdata:/prometheus
+    depends_on:
+      - api
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    profiles: ["obs"]
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafanadata:/var/lib/grafana
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  # ── 推理服务（可选，需要 GPU / nvidia-container-toolkit）──
+  vllm:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    profiles: ["llm"]
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./pre_train_model:/app/pre_train_model:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:
+  promdata:
+  grafanadata:

@@ -1,0 +1,77 @@
+{
+  "title": "座舱 Agent 服务看板",
+  "uid": "cockpit-agent",
+  "tags": ["agent", "cockpit", "llm"],
+  "timezone": "browser",
+  "refresh": "10s",
+  "time": {"from": "now-30m", "to": "now"},
+  "templating": {
+    "list": [
+      {"name": "instance", "type": "query", "datasource": "Prometheus",
+       "query": "label_values(agent_up, instance)", "includeAll": true, "multi": true}
+    ]
+  },
+  "panels": [
+    {
+      "type": "stat", "title": "QPS（按路径）", "gridPos": {"h": 5, "w": 6, "x": 0, "y": 0},
+      "targets": [{"expr": "sum(rate(agent_http_requests_total[1m])) by (path)", "legendFormat": "{{path}}"}],
+      "fieldConfig": {"defaults": {"unit": "reqps"}, "overrides": []}
+    },
+    {
+      "type": "stat", "title": "P95 延迟", "gridPos": {"h": 5, "w": 6, "x": 6, "y": 0},
+      "targets": [{"expr": "histogram_quantile(0.95, sum(rate(agent_request_duration_seconds_bucket[5m])) by (le))"}],
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []}
+    },
+    {
+      "type": "stat", "title": "TTFT P50（SSE 首字）", "gridPos": {"h": 5, "w": 6, "x": 12, "y": 0},
+      "targets": [{"expr": "histogram_quantile(0.5, sum(rate(agent_ttft_seconds_bucket[5m])) by (le))"}],
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []}
+    },
+    {
+      "type": "stat", "title": "今日成本 (USD)", "gridPos": {"h": 5, "w": 6, "x": 18, "y": 0},
+      "targets": [{"expr": "sum(increase(agent_cost_usd_total[24h]))"}],
+      "fieldConfig": {"defaults": {"unit": "currencyUSD"}, "overrides": []}
+    },
+    {
+      "type": "timeseries", "title": "延迟分位（P50 / P95 / P99）",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 5},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum(rate(agent_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.95, sum(rate(agent_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p95"},
+        {"expr": "histogram_quantile(0.99, sum(rate(agent_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p99"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []}
+    },
+    {
+      "type": "timeseries", "title": "Token 消耗速率（输入 / 输出）",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 5},
+      "targets": [{"expr": "sum(rate(agent_tokens_total[5m])) by (kind)", "legendFormat": "{{kind}}"}],
+      "fieldConfig": {"defaults": {"unit": "none"}, "overrides": []}
+    },
+    {
+      "type": "timeseries", "title": "工具调用（按工具 / 成败）",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 13},
+      "targets": [{"expr": "sum(rate(agent_tool_calls_total[5m])) by (tool, ok)", "legendFormat": "{{tool}} ok={{ok}}"}]
+    },
+    {
+      "type": "timeseries", "title": "护栏与人机边界事件",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 13},
+      "targets": [
+        {"expr": "sum(rate(agent_guardrail_blocks_total[5m])) by (tool)", "legendFormat": "拦截 {{tool}}"},
+        {"expr": "sum(rate(agent_rate_limited_total[5m]))", "legendFormat": "限流 429"},
+        {"expr": "sum(rate(agent_quota_exceeded_total[5m]))", "legendFormat": "配额 429"},
+        {"expr": "sum(rate(agent_injection_flagged_total[5m]))", "legendFormat": "注入告警"},
+        {"expr": "sum(rate(agent_idempotent_replays_total[5m]))", "legendFormat": "幂等重放"}
+      ]
+    },
+    {
+      "type": "timeseries", "title": "降级与拒答（可用性信号）",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 21},
+      "targets": [
+        {"expr": "sum(rate(agent_degraded_requests_total[5m]))", "legendFormat": "降级请求"},
+        {"expr": "sum(rate(agent_refusals_total[5m]))", "legendFormat": "拒答"},
+        {"expr": "sum(rate(agent_http_requests_total{status=~\"5..\"}[5m]))", "legendFormat": "5xx"}
+      ]
+    }
+  ]
+}

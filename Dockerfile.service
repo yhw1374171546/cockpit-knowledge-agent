@@ -1,0 +1,33 @@
+# ── Agent 服务镜像（与课程原有的 Dockerfile 区分开：那个是 vLLM 推理镜像）──
+# 只装服务层与 Agent 必需依赖；语料与模型权重通过 volume 挂载，不进镜像。
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    TZ=Asia/Shanghai
+
+WORKDIR /app
+
+# 先装依赖（利用层缓存）
+COPY requirements.txt requirements-service.txt ./
+RUN pip install --no-cache-dir -r requirements-service.txt \
+ && pip install --no-cache-dir jieba
+
+# 再拷代码（语料与模型不入镜像，见 .dockerignore）
+COPY agent/ ./agent/
+COPY kb/ ./kb/
+COPY eval/ ./eval/
+
+# 非 root 运行
+RUN useradd -m -u 10001 appuser && chown -R appuser:appuser /app
+USER appuser
+
+EXPOSE 8077
+
+# 就绪检查走 /readyz（DB、KV、知识库都可用才算 ready）
+HEALTHCHECK --interval=15s --timeout=5s --start-period=90s --retries=3 \
+    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8077/readyz',timeout=4).status==200 else 1)"
+
+CMD ["python", "-m", "uvicorn", "agent.service.app:app", \
+     "--host", "0.0.0.0", "--port", "8077", "--log-level", "info"]

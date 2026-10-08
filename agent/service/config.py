@@ -39,9 +39,10 @@ class Settings:
     database_url: str = ""
     db_echo: bool = False
 
-    # KV：默认进程内（单实例），生产换 Redis
-    kv_backend: str = ""              # memory | redis
+    # KV：默认进程内（单实例），生产换 Redis；sqlite 用于单机多 worker 共享
+    kv_backend: str = ""              # memory | redis | sqlite
     redis_url: str = ""
+    kv_sqlite_path: str = ""
 
     # 鉴权
     jwt_secret: str = ""
@@ -69,6 +70,15 @@ class Settings:
     llm_model: str = "Qwen2_5_7B_Instruct"
     llm_ms_per_token: float = 4.0
 
+    # 故障注入与降级（用于高可用演练）
+    fault_mode: str = "none"          # none | error | timeout | flaky
+    fault_rate: float = 0.0           # flaky 模式下的失败概率
+    fault_sleep_s: float = 0.05
+    enable_degradation: bool = True   # 主后端失败时回退到离线规则规划器
+
+    # 指标暴露：默认仅 service/admin 可访问；置 1 则公开（Prometheus 抓取用）
+    metrics_public: bool = False
+
     # 知识库
     kb_path: str = ""
 
@@ -90,6 +100,7 @@ class Settings:
             db_echo=os.environ.get("SERVICE_DB_ECHO", "").lower() in ("1", "true"),
             kv_backend=os.environ.get("SERVICE_KV_BACKEND", ""),
             redis_url=os.environ.get("SERVICE_REDIS_URL", ""),
+            kv_sqlite_path=os.environ.get("SERVICE_KV_SQLITE_PATH", ""),
             jwt_secret=os.environ.get("SERVICE_JWT_SECRET", "dev-secret-change-me"),
             jwt_ttl_seconds=_int("SERVICE_JWT_TTL_SECONDS", 3600),
             auth_required=os.environ.get("SERVICE_AUTH_REQUIRED", "1").lower() not in ("0", "false"),
@@ -104,6 +115,12 @@ class Settings:
             llm_base_url=os.environ.get("SERVICE_LLM_BASE_URL", "http://127.0.0.1:8000/v1"),
             llm_model=os.environ.get("SERVICE_LLM_MODEL", "Qwen2_5_7B_Instruct"),
             llm_ms_per_token=_float("SERVICE_LLM_MS_PER_TOKEN", 4.0),
+            fault_mode=os.environ.get("SERVICE_FAULT_MODE", "none"),
+            fault_rate=_float("SERVICE_FAULT_RATE", 0.0),
+            fault_sleep_s=_float("SERVICE_FAULT_SLEEP_S", 0.05),
+            enable_degradation=os.environ.get("SERVICE_ENABLE_DEGRADATION", "1").lower()
+            not in ("0", "false"),
+            metrics_public=os.environ.get("SERVICE_METRICS_PUBLIC", "0").lower() in ("1", "true"),
             kb_path=os.environ.get("AGENT_KB_PATH", ""),
             default_vehicle_model=os.environ.get("SERVICE_DEFAULT_VEHICLE_MODEL", "lynk08"),
             allowed_models=[m.strip() for m in models.split(",") if m.strip()],

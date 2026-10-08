@@ -35,7 +35,7 @@ from contextlib import asynccontextmanager
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
 from agent.graph import AgentConfig, AgentGraph
 from agent.guardrails.policy import PolicyEngine, ToolPolicy
@@ -51,6 +51,8 @@ from agent.service.config import Settings
 from agent.service.db import (Database, Feedback, MessageRow, SessionRow, ToolCallRow,
                               get_database, reset_database)
 from agent.service.kv import KVStore, build_kv
+from agent.service.faults import DegradingLLM, FaultyLLM
+from agent.service.metrics import METRICS
 from agent.service.schemas import (ChatRequest, ChatResponse, ConfirmRequest,
                                    ConfirmResponse, ErrorResponse, FeedbackRequest,
                                    HealthResponse, SessionInfo, TokenRequest,
@@ -94,11 +96,25 @@ class AgentRuntime:
     def build_llm(self, on_delta: Optional[Callable[[str], None]] = None) -> LLMBackend:
         backend = (self.settings.llm_backend or "planner").lower()
         if backend in ("streaming", "simulated"):
-            return StreamingRulePlanner(ms_per_chunk=self.settings.llm_ms_per_token * 6)
-        if backend == "openai":
-            return OpenAICompatibleLLM(base_url=self.settings.llm_base_url,
-                                       model=self.settings.llm_model)
-        return RuleBasedPlannerLLM()
+            inner: LLMBackend = StreamingRulePlanner(
+                ms_per_chunk=self.settings.llm_ms_per_token * 6)
+        elif backend == "openai":
+            inner = OpenAICompatibleLLM(base_url=self.settings.llm_base_url,
+                                        model=self.settings.llm_model,
+                                        provider="vllm")
+        else:
+            inner = RuleBasedPlannerLLM()
+        # 故障注入（演练用）：包一层可注入超时/报错
+        if (self.settings.fault_mode or "none").lower() != "none":
+            inner = FaultyLLM(inner, mode=self.settings.fault_mode,
+                              rate=self.settings.fault_rate,
+                              sleep_s=self.settings.fault_sleep_s)
+        # 降级链：主后端失败 → 回退到离线规则规划器（座舱不至于彻底失能）
+        if self.settings.enable_degradation:
+            inner = DegradingLLM(
+                inner, on_degrade=lambda reason: METRICS.inc("agent_degraded_total",
+                                                             {"reason": reason[:40]}))
+        return inner
 
     def build_agent(self, vehicle_model: str, confirmed: Optional[set] = None,
                     on_delta: Optional[Callable[[str], None]] = None,
@@ -199,7 +215,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         db = get_database(settings.database_url, settings.db_echo)
         db.init()
         app.state.db = db
-        app.state.kv = build_kv(settings.kv_backend, settings.redis_url)
+        app.state.kv = build_kv(settings.kv_backend, settings.redis_url,
+                               settings.kv_sqlite_path)
         app.state.runtime = AgentRuntime(settings)
         app.state.started_at = time.time()
         # 预热默认租户知识库，让 /readyz 有真实含义
@@ -227,6 +244,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         response = await call_next(request)
         cost_ms = (time.perf_counter() - start) * 1000
         response.headers["X-Trace-Id"] = trace_id
+        # 指标：请求量按（路径, 状态码）计数 + 耗时直方图（多进程时各实例各一份，由 Prometheus 聚合）
+        METRICS.inc("agent_http_requests_total",
+                    {"path": request.url.path, "status": str(response.status_code)})
+        METRICS.observe_latency(cost_ms / 1000.0)
         logger.info(json.dumps({
             "trace_id": trace_id, "method": request.method, "path": request.url.path,
             "status": response.status_code, "ms": round(cost_ms, 2),
@@ -386,6 +407,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 return
             result: ChatResponse = holder["result"]
             result.ttft_ms = round(first_delta["ms"], 2) if first_delta["ms"] else result.latency_ms
+            if first_delta["ms"]:
+                METRICS.observe_ttft(first_delta["ms"] / 1000.0)     # SSE 首字延迟直方图
             yield _sse("citations", {"citations": result.citations,
                                      "risk_level": result.risk_level})
             yield _sse("done", result.model_dump())
@@ -416,6 +439,25 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             db.add(Feedback(message_id=body.message_id, user_id=principal.user_id,
                             rating=body.rating, comment=body.comment[:1000]))
         return {"ok": True}
+
+    # ── 指标（Prometheus 文本格式，零依赖手写）──
+    @app.get("/metrics", tags=["ops"], summary="Prometheus 指标",
+             response_class=PlainTextResponse)
+    async def metrics_endpoint(request: Request,
+                              authorization: Optional[str] = Header(None)):
+        """默认仅 service/admin 可访问；`SERVICE_METRICS_PUBLIC=1` 时公开（Prometheus 抓取）。
+
+        注意：计数器是**进程内**的，`--workers 4` 时每个 worker 各一份，
+        由 Prometheus 分别 scrape 后在服务端聚合（标准做法）。
+        """
+        if not settings.metrics_public:
+            try:
+                principal = principal_of(request, authorization)
+            except HTTPException as exc:
+                raise exc
+            if not principal.is_privileged:
+                raise HTTPException(status_code=403, detail="需要 service 或 admin 角色")
+        return PlainTextResponse(METRICS.render())
 
     # ── 运维/治理接口 ──
     @app.get("/v1/admin/audit", tags=["ops"], summary="最近审计日志（需 service/admin 角色）")
@@ -473,6 +515,7 @@ async def _prepare(request: Request, body: ChatRequest, principal: Principal,
     # ① 限流
     limit = RateLimiter(kv, settings).hit(principal.user_id, model)
     if not limit.allowed:
+        METRICS.inc("agent_rate_limited_total", {"vehicle_model": model})
         raise HTTPException(status_code=429,
                             detail=f"请求过于频繁，请在 {limit.retry_after}s 后重试",
                             headers={"Retry-After": str(limit.retry_after)})
@@ -480,6 +523,7 @@ async def _prepare(request: Request, body: ChatRequest, principal: Principal,
     # ② 配额
     quota = QuotaService(db, settings).check(principal.user_id)
     if not quota.allowed:
+        METRICS.inc("agent_quota_exceeded_total")
         raise HTTPException(status_code=429,
                             detail=f"今日 token 配额已用完（{quota.used}/{quota.limit}）")
 
@@ -494,27 +538,30 @@ async def _prepare(request: Request, body: ChatRequest, principal: Principal,
             raise HTTPException(status_code=409, detail=outcome.reason,
                                 headers={"Retry-After": "1"})
         if outcome.replay and outcome.response:
+            METRICS.inc("agent_idempotent_replays_total")
             replay = ChatResponse(**outcome.response)
             replay.idempotent_replay = True
             return replay
 
-    # ④ 会话
+    # ④ 会话：**这里只读、不写**。
+    # 写路径优化（针对压测暴露的 SQLite 单写者瓶颈）：把「用户消息 + 助手消息 + 工具调用
+    # + 审计 + 配额 + 幂等完成」合并到 _run_and_persist 里的**同一个事务**。
+    # 优化前每请求要开 4 次写事务（user 消息 / assistant+工具+审计 / 配额 / 幂等），
+    # 而 SQLite 只允许一个写者 —— 事务数直接决定并发下的排队长度。
     session_id = body.session_id
+    session_is_new = False
     with db.session() as session:
         row = session.get(SessionRow, session_id) if session_id else None
+        if row is not None and row.user_id != principal.user_id:
+            raise HTTPException(status_code=403, detail="无权访问该会话")
         if row is None:
             session_id = session_id or str(uuid.uuid4())
-            row = SessionRow(id=session_id, vehicle_model=model, user_id=principal.user_id,
-                             title=body.message[:24])
-            session.add(row)
-        elif row.user_id != principal.user_id:
-            raise HTTPException(status_code=403, detail="无权访问该会话")
-        session.add(MessageRow(session_id=session_id, role="user", content=body.message))
+            session_is_new = True
 
     return {"trace_id": _trace_id(request), "session_id": session_id, "vehicle_model": model,
             "user_id": principal.user_id, "message": body.message,
             "idempotency_key": idempotency_key, "principal": principal,
-            "request_hash": request_hash}
+            "request_hash": request_hash, "session_is_new": session_is_new}
 
 
 def _load_history(db: Database, session_id: str, max_turns: int = 6) -> List[Tuple[str, str]]:
@@ -550,6 +597,16 @@ def _run_and_persist(request: Request, ctx: Dict[str, Any],
     # on_delta 必须传进 run()：AgentGraph 据此把最终答案改为流式生成（SSE 的 token 来源）
     state = agent.run(ctx["message"], on_delta=on_delta)
 
+    # 降级统计（主推理后端不可用时回退到了离线规则规划器）
+    degraded, degrade_reason = False, ""
+    degrade_stats = getattr(agent.llm, "stats", None)
+    if callable(degrade_stats):
+        info = degrade_stats()
+        degraded = bool(info.get("degraded_calls"))
+        degrade_reason = str(info.get("last_error") or "")[:200]
+        if degraded:
+            METRICS.inc("agent_degraded_requests_total")
+
     latency_ms = (time.perf_counter() - t0) * 1000
     tokens_in, tokens_out = state.tokens_in, state.tokens_out
     cost = tracer.totals()["cost_usd"]
@@ -560,7 +617,18 @@ def _run_and_persist(request: Request, ctx: Dict[str, Any],
             needs_confirmation = call["arguments"].get("item")
 
     audit = AuditService(db)
+    quota_service = QuotaService(db, settings)
+    idem_store = IdempotencyStore(db, settings)
+    # ── 单事务写路径 ──
+    # 优化前：user 消息(1) + assistant/工具/审计(1) + 配额(1) + 幂等完成(1) = 4 次写事务/请求。
+    # SQLite 只允许一个写者，事务数直接决定并发排队长度（压测：QPS 随并发下降、P99 爆到 1.6s）。
+    # 现在合并为 1 次：会话(如需) + user 消息 + assistant 消息 + 工具调用 + 审计 + 配额 + 幂等完成。
     with db.session() as session:
+        if ctx.get("session_is_new"):
+            session.add(SessionRow(id=ctx["session_id"], vehicle_model=ctx["vehicle_model"],
+                                   user_id=ctx["user_id"], title=ctx["message"][:24]))
+        session.add(MessageRow(session_id=ctx["session_id"], role="user",
+                               content=ctx["message"], trace_id=ctx["trace_id"]))
         message = MessageRow(session_id=ctx["session_id"], role="assistant",
                              content=state.answer or "", status=state.status,
                              citations=json.dumps(state.citations, ensure_ascii=False),
@@ -584,7 +652,6 @@ def _run_and_persist(request: Request, ctx: Dict[str, Any],
                 idempotency_key=(ctx["idempotency_key"] if write else None),
                 trace_id=ctx["trace_id"]))
             if write:
-                # 同一事务里写审计，避免嵌套 session（SQLite 下会 database is locked）
                 audit.log_in_session(session, ctx["user_id"], "write_tool", call["tool"],
                                      before="requested",
                                      after={"ok": ok, "blocked": blocked,
@@ -592,30 +659,46 @@ def _run_and_persist(request: Request, ctx: Dict[str, Any],
                                      trace_id=ctx["trace_id"])
         session.query(SessionRow).filter(SessionRow.id == ctx["session_id"]).update(
             {"updated_at": dt.datetime.utcnow()})
+        # 配额与幂等完成也进同一事务（读一次写一次，不再各开一个事务）
+        quota = quota_service.record_in_session(session, ctx["user_id"],
+                                                tokens_in + tokens_out, cost)
+        # 响应必须在事务内构造：message_id 来自 flush，quota 来自上面的记账，
+        # 而且要立刻把响应写回幂等键（重放才能拿到同一份结果）。
+        response = ChatResponse(
+            trace_id=ctx["trace_id"], session_id=ctx["session_id"], message_id=message_id,
+            status=state.status, answer=state.answer or "", citations=state.citations,
+            tool_calls=[ToolCallInfo(tool=c["tool"], arguments=c.get("arguments") or {},
+                                     ok=bool(c.get("ok")), blocked=bool(c.get("blocked")),
+                                     repeated=bool(c.get("repeated")),
+                                     repaired=bool(c.get("repaired")),
+                                     reason=str(c.get("error") or ""),
+                                     idempotency_key=(ctx.get("idempotency_key") or ""
+                                                      if c["tool"] in WRITE_TOOLS else ""),
+                                     latency_ms=float(c.get("latency_ms") or 0.0))
+                        for c in state.tool_calls],
+            risk_level="critical" if state.injection_flagged else "ok",
+            needs_confirmation=needs_confirmation, injection_flagged=state.injection_flagged,
+            tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=cost,
+            latency_ms=round(latency_ms, 2), ttft_ms=round(latency_ms, 2),
+            degraded=degraded, degrade_reason=degrade_reason,
+            quota={"used": quota.used, "limit": quota.limit, "remaining": quota.remaining})
+        # 领域指标：token/成本/工具调用/护栏拦截
+        METRICS.inc("agent_tokens_total", {"kind": "input"}, tokens_in)
+        METRICS.inc("agent_tokens_total", {"kind": "output"}, tokens_out)
+        METRICS.inc("agent_cost_usd_total", value=cost)
+        for call in state.tool_calls:
+            METRICS.inc("agent_tool_calls_total",
+                        {"tool": call["tool"], "ok": str(bool(call.get("ok"))).lower()})
+            if call.get("blocked"):
+                METRICS.inc("agent_guardrail_blocks_total", {"tool": call["tool"]})
+        if state.status == "refused":
+            METRICS.inc("agent_refusals_total")
+        if state.injection_flagged:
+            METRICS.inc("agent_injection_flagged_total")
+        if ctx.get("idempotency_key"):
+            idem_store.complete_in_session(session, ctx["user_id"], ctx["idempotency_key"],
+                                           response.model_dump())
 
-    quota = QuotaService(db, settings).record(ctx["user_id"], tokens_in + tokens_out, cost)
-
-    response = ChatResponse(
-        trace_id=ctx["trace_id"], session_id=ctx["session_id"], message_id=message_id,
-        status=state.status, answer=state.answer or "", citations=state.citations,
-        tool_calls=[ToolCallInfo(tool=c["tool"], arguments=c.get("arguments") or {},
-                                 ok=bool(c.get("ok")), blocked=bool(c.get("blocked")),
-                                 repeated=bool(c.get("repeated")),
-                                 repaired=bool(c.get("repaired")),
-                                 reason=str(c.get("error") or ""),
-                                 idempotency_key=(ctx.get("idempotency_key") or ""
-                                                  if c["tool"] in WRITE_TOOLS else ""),
-                                 latency_ms=float(c.get("latency_ms") or 0.0))
-                    for c in state.tool_calls],
-        risk_level="critical" if state.injection_flagged else "ok",
-        needs_confirmation=needs_confirmation, injection_flagged=state.injection_flagged,
-        tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=cost, latency_ms=round(latency_ms, 2),
-        ttft_ms=round(latency_ms, 2),
-        quota={"used": quota.used, "limit": quota.limit, "remaining": quota.remaining})
-
-    if ctx.get("idempotency_key"):
-        IdempotencyStore(db, settings).complete(ctx["user_id"], ctx["idempotency_key"],
-                                                response.model_dump())
     return response
 
 

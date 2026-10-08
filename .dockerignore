@@ -1,0 +1,35 @@
+# 镜像上下文排除：语料、模型权重、产物、密钥一律不进镜像
+.git/
+.github/
+docs/
+data/
+pre_train_model/
+vector_store/
+model_cache/
+images/
+benchmark/
+
+*.db
+*.db-wal
+*.db-shm
+*.log
+*.pdf
+*.docx
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+# 密钥（绝对不能进镜像层）
+.env
+.env.*
+!.env.example
+secrets/
+*.key
+
+# 大体积评测产物（可在容器内重新生成）
+eval/*.json
+eval/*.jsonl
+eval/*.md
+!eval/thresholds.json
+!eval/fixtures/*.jsonl

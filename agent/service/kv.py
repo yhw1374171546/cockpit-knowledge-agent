@@ -120,9 +120,116 @@ class RedisKV:
             return False
 
 
-def build_kv(backend: str = "", redis_url: str = "") -> KVStore:
-    """按配置构建 KV；Redis 不可用时**明确降级**而不是崩溃。"""
-    want_redis = (backend or "").lower() == "redis" or bool(redis_url)
+class SqliteKV:
+    """共享文件 KV：**单机多 worker** 场景下的正确选择（多进程共享同一 SQLite 文件）。
+
+    为什么需要它：进程内实现（`InMemoryKV`）在 `uvicorn --workers N` 或起多个容器时，
+    每个副本各算一份额度——限流/配额形同虚设。本实现把状态放到共享文件里，
+    用 `BEGIN IMMEDIATE` + WAL 保证 `incr` 的跨进程原子性。
+
+    生产多实例（跨机器）仍应使用 Redis；本类适合单机多进程或作为 Redis 不可用时的
+    共享兜底，也用于**验证"共享 KV 才能让多副本限流正确"**这一结论。
+    """
+
+    def __init__(self, path: str = "kv_shared.db") -> None:
+        import sqlite3
+
+        self._path = path
+        self._lock = threading.RLock()
+        self._conn = sqlite3.connect(path, check_same_thread=False, timeout=30,
+                                     isolation_level=None)
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout=30000")
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT, exp REAL)")
+        self._conn.commit()
+
+    def _alive(self, exp) -> bool:
+        return exp is None or float(exp) > time.time()
+
+    def get(self, key: str) -> Optional[str]:
+        with self._lock:
+            row = self._conn.execute("SELECT v, exp FROM kv WHERE k=?", (key,)).fetchone()
+            if row is None or not self._alive(row[1]):
+                return None
+            return str(row[0])
+
+    def set(self, key: str, value: str, ttl: Optional[int] = None) -> None:
+        exp = time.time() + ttl if ttl else None
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO kv(k,v,exp) VALUES(?,?,?) "
+                "ON CONFLICT(k) DO UPDATE SET v=excluded.v, exp=excluded.exp",
+                (key, str(value), exp))
+            self._conn.commit()
+
+    def delete(self, key: str) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM kv WHERE k=?", (key,))
+            self._conn.commit()
+
+    def incr(self, key: str, amount: int = 1, ttl: Optional[int] = None) -> int:
+        """跨进程原子自增：BEGIN IMMEDIATE 抢占写锁后再读改写。"""
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._conn.execute("SELECT v, exp FROM kv WHERE k=?",
+                                         (key,)).fetchone()
+                now = time.time()
+                if row is None or not self._alive(row[1]):
+                    value, exp = int(amount), (now + ttl if ttl else None)
+                else:
+                    value, exp = int(row[0]) + int(amount), row[1]
+                self._conn.execute(
+                    "INSERT INTO kv(k,v,exp) VALUES(?,?,?) "
+                    "ON CONFLICT(k) DO UPDATE SET v=excluded.v, exp=excluded.exp",
+                    (key, str(value), exp))
+                self._conn.execute("COMMIT")
+                return value
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+
+    def setnx(self, key: str, value: str, ttl: Optional[int] = None) -> bool:
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._conn.execute("SELECT v, exp FROM kv WHERE k=?",
+                                         (key,)).fetchone()
+                if row is not None and self._alive(row[1]):
+                    self._conn.execute("COMMIT")
+                    return False
+                exp = time.time() + ttl if ttl else None
+                self._conn.execute(
+                    "INSERT INTO kv(k,v,exp) VALUES(?,?,?) "
+                    "ON CONFLICT(k) DO UPDATE SET v=excluded.v, exp=excluded.exp",
+                    (key, str(value), exp))
+                self._conn.execute("COMMIT")
+                return True
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+
+    def backend(self) -> str:
+        return "sqlite"
+
+    def close(self) -> None:
+        try:
+            self._conn.close()
+        except Exception:                                          # noqa: BLE001
+            pass
+
+
+def build_kv(backend: str = "", redis_url: str = "", sqlite_path: str = "") -> KVStore:
+    """按配置构建 KV。
+
+    优先级：显式 backend > redis_url > 默认进程内。
+    Redis 不可用时**明确降级**为进程内实现（单实例可跑，但多副本会失效——文档已注明）。
+    """
+    name = (backend or "").lower()
+    if name == "sqlite":
+        return SqliteKV(sqlite_path or "kv_shared.db")
+    want_redis = name == "redis" or bool(redis_url)
     if want_redis:
         try:
             kv = RedisKV(redis_url or "redis://127.0.0.1:6379/0")
