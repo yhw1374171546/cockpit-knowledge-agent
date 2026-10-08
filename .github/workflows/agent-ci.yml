@@ -38,7 +38,9 @@ jobs:
         run: python -m compileall -q agent kb eval
 
       - name: Unit tests (no corpus needed)
-        run: python agent/tests/test_guardrails.py
+        run: |
+          python agent/tests/test_guardrails.py
+          python agent/tests/test_regressions.py
 
       - name: Unit tests (mini corpus)
         env:
@@ -47,6 +49,9 @@ jobs:
           python agent/tests/test_offline.py
           python agent/tests/test_fc_pipeline.py
           python agent/tests/test_multiagent.py
+
+      - name: Extra eval smoke (multi-turn / colloquial / edge / citation)
+        run: python eval/eval_extra_smoke.py
 
       - name: End-to-end smoke on mini corpus
         run: python eval/ci_smoke.py

@@ -17,6 +17,69 @@ from typing import Dict, List, Optional, Sequence
 NO_ANSWER = "无答案"
 # 只匹配「像引用」的方括号内容（含页码 / 块号 / 文件名），避免把 JSON 数组括号误判为引用
 CITATION_RE = re.compile(r"\[([^\[\]]{1,80}?(?:第\s*\d+\s*页|块#\d+|\.pdf|手册)[^\[\]]{0,40}?)\]")
+
+# 引用三元组解析：来源 / 页码 / 标题（形如 `[train_a.pdf 第61页·灯光]`）
+CITE_SOURCE_RE = re.compile(r"([^\s\[\]·・]+\.(?:pdf|PDF|docx?|DOCX?))")
+CITE_PAGE_RE = re.compile(r"第\s*(\d{1,4})\s*页")
+CITE_TITLE_RE = re.compile(r"[·・]\s*([^\[\]]+?)\s*\]?\s*$")
+
+
+def _norm_text(value) -> str:
+    return re.sub(r"\s+", "", str(value or "")).lower()
+
+
+def parse_citation(cite: str):
+    """把一条引用拆成 (来源, 页码, 标题)；缺项返回 None。
+
+    为什么要拆：子串比对无法区分「来源错配」「标题错配」与「正确引用」，
+    只有拆成三元组逐项核对，才能把这两类错误判出来。
+    """
+    text = str(cite or "")
+    src = CITE_SOURCE_RE.search(text)
+    page = CITE_PAGE_RE.search(text)
+    title = CITE_TITLE_RE.search(text)
+    return (src.group(1) if src else None,
+            int(page.group(1)) if page else None,
+            title.group(1) if title else None)
+
+
+def _citation_problems(cite: str, ev_sources: set, ev_pages: set,
+                       pages_by_source: Dict[str, set],
+                       titles_by_key: Dict[tuple, set]) -> List[str]:
+    """返回这条引用的问题列表；空列表表示校验通过。"""
+    src, page, title = parse_citation(cite)
+    problems: List[str] = []
+
+    src_norm = _norm_text(src)
+    if src_norm and ev_sources and src_norm not in ev_sources:
+        problems.append("source_mismatch")
+
+    if page is not None:
+        if not ev_pages:
+            # 证据完全没有页码元数据 → 只能标记为不可核验，不能判为编造
+            return ["no_page_metadata"]
+        if src_norm and src_norm in pages_by_source:
+            if page not in pages_by_source[src_norm]:
+                problems.append("page_mismatch")
+        elif page not in ev_pages:
+            problems.append("page_mismatch")
+
+    if title:
+        title_norm = _norm_text(title)
+        # 只看与本次引用来源/页码匹配的那些证据标题；若都没有标题元数据则跳过
+        allowed = set()
+        for (s, p), titles in titles_by_key.items():
+            if src_norm and s and s != src_norm:
+                continue
+            if page is not None and p is not None and p != page:
+                continue
+            allowed |= titles
+        if allowed and title_norm not in allowed:
+            problems.append("title_mismatch")
+
+    return problems
+
+
 # 无括号的裸页码引用，例如「第 9999 页」
 BARE_PAGE_RE = re.compile(r"第\s*(\d{1,4})\s*页")
 
@@ -93,29 +156,52 @@ class Reflector:
                 unsupported.append(sent)
         ratio = 1.0 - (len(unsupported) / len(sentences)) if sentences else 0.0
 
-        # 引用有效性：引用的出处必须能在本次证据里找到
-        valid_cites = set()
-        known_pages = set()
+        # 引用有效性：**结构化比对**引用出处（来源 / 页码 / 标题三元组）
+        #
+        # 修复的缺陷：原实现用 `cite in v or v in cite` 的子串包含判定，
+        # 于是公共子串会漏判——`[另一个手册.pdf 第5页]`（来源错配）会因为证据里
+        # 恰好有第 5 页而通过；`[第3页·座椅]`（标题错配）也会因为 `第3页` 命中而通过。
+        # 评测集（eval/citation_eval.py）实测：这类样本一个都没被拦住。
+        ev_sources = set()
+        ev_pages = set()
+        pages_by_source: Dict[str, set] = {}
+        titles_by_key: Dict[tuple, set] = {}
         for e in evidence:
-            valid_cites.add(e.get("citation", ""))
-            if e.get("page") is not None:
-                known_pages.add(int(e["page"]))
-                valid_cites.add(f"第{e['page']}页")
+            src = _norm_text(e.get("source"))
+            page = e.get("page")
+            title = _norm_text(e.get("header") or e.get("title"))
+            if src:
+                ev_sources.add(src)
+            if page is not None:
+                page = int(page)
+                ev_pages.add(page)
+                if src:
+                    pages_by_source.setdefault(src, set()).add(page)
+                if title:
+                    titles_by_key.setdefault((src, page), set()).add(title)
 
         invalid: List[str] = []
         unverifiable: List[str] = []
         for cite in (citations if citations is not None else CITATION_RE.findall(answer)):
-            if cite and not any(cite in v or v in cite for v in valid_cites):
-                invalid.append(cite)
+            if not cite:
+                continue
+            problems = _citation_problems(cite, ev_sources, ev_pages, pages_by_source,
+                                          titles_by_key)
+            if problems:
+                if problems == ["no_page_metadata"]:
+                    if cite not in unverifiable:
+                        unverifiable.append(cite)
+                elif cite not in invalid:
+                    invalid.append(cite)
 
         # 无括号的裸页码（如「第9999页」）：有页码元数据时可判定真伪，无元数据时只能标记为不可核验
         for raw_page in BARE_PAGE_RE.findall(answer or ""):
             page_no = int(raw_page)
             label = f"第{page_no}页"
-            if not known_pages:
+            if not ev_pages:
                 if label not in unverifiable:
                     unverifiable.append(label)
-            elif page_no not in known_pages:
+            elif page_no not in ev_pages:
                 if label not in invalid:
                     invalid.append(label)
 
@@ -130,7 +216,7 @@ class Reflector:
                                 action,
                                 {"n_sentences": len(sentences),
                                  "n_evidence": len(evidence_texts),
-                                 "pages_known": sorted(known_pages),
+                                 "pages_known": sorted(ev_pages),
                                  "question_coverage": round(char_coverage(question, joined), 4)
                                  if question else None})
 
