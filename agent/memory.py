@@ -93,14 +93,28 @@ class ConversationMemory:
             return True
         return any(p in q for p in PRONOUNS) and len(q) <= 14
 
+    def topic_from_history(self) -> str:
+        """从最近一轮用户提问推断话题（`current_topic` 未被显式设置时的兜底）。
+
+        修复的缺陷：`needs_context()` 判定"需要上下文"，但 `resolve()` 依赖
+        `self.current_topic`——而它在纯离线链路里**从未被设置**，于是指代消解静默失效
+        （解析结果等于原句，检索不到 → 拒答）。二者是隐性契约，一旦一端没人调用就会
+        出现"看起来支持多轮、实际不支持"的假象。
+        """
+        for turn in reversed(self.turns):
+            if turn.role == "user" and turn.content.strip():
+                return turn.content.strip()
+        return self.current_topic
+
     def resolve(self, question: str) -> str:
         """把省略/指代问题补全成可检索的独立查询。"""
         q = (question or "").strip()
-        if not self.needs_context(q) or not self.current_topic:
+        topic = self.current_topic or self.topic_from_history()
+        if not self.needs_context(q) or not topic:
             return q
-        if self.current_topic in q:
+        if topic in q:
             return q
-        return f"{self.current_topic} {q}"
+        return f"{topic} {q}"
 
     def system_context(self) -> str:
         lines = [f"车主档案：{self.profile.describe()}"]

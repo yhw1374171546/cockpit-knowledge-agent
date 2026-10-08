@@ -102,7 +102,8 @@ class AgentRuntime:
 
     def build_agent(self, vehicle_model: str, confirmed: Optional[set] = None,
                     on_delta: Optional[Callable[[str], None]] = None,
-                    idempotency_key: str = ""
+                    idempotency_key: str = "",
+                    history: Optional[List[Tuple[str, str]]] = None
                     ) -> Tuple[AgentGraph, Tracer, ToolRegistry]:
         kb = self.kb(vehicle_model)
         registry = build_default_registry(self.settings.kb_path or None)
@@ -114,11 +115,20 @@ class AgentRuntime:
         config = AgentConfig()
         # 服务层收紧：写操作必须带 Idempotency-Key（客户端重试不会重复下单）
         config.idempotency_key = idempotency_key
+        memory = ConversationMemory(profile=VehicleProfile(model=vehicle_model))
+        # 会话记忆落库回填：没有这一步，服务层的多轮是**断的**——
+        # `sessions`/`messages` 表里存了历史，但每个请求都新建一份空记忆，
+        # 于是"它怎么关闭"这类追问无法解析指代。
+        for role, content in (history or []):
+            if role == "user":
+                memory.add_user(content)
+            elif role == "assistant" and content:
+                memory.add_assistant(content)
         agent = AgentGraph(self.build_llm(on_delta), registry,
                           reflector=Reflector(
                               evidence_overlap_threshold=config.evidence_overlap_threshold),
-                          memory=ConversationMemory(profile=VehicleProfile(model=vehicle_model)),
-                          config=config, tracer=tracer, policy=policy, agent_name="service")
+                          memory=memory, config=config, tracer=tracer, policy=policy,
+                          agent_name="service")
         return agent, tracer, registry
 
     def build_policy(self) -> PolicyEngine:
@@ -502,6 +512,23 @@ async def _prepare(request: Request, body: ChatRequest, principal: Principal,
             "request_hash": request_hash}
 
 
+def _load_history(db: Database, session_id: str, max_turns: int = 6) -> List[Tuple[str, str]]:
+    """读取会话最近的历史消息（按时间正序），用于回填对话记忆。
+
+    只取最近 `max_turns` 轮，避免把整段历史塞进 prompt（成本与上下文都要控）。
+    """
+    with db.session() as session:
+        rows = (session.query(MessageRow)
+                .filter(MessageRow.session_id == session_id)
+                .order_by(MessageRow.id.desc())
+                .limit(max_turns * 2).all())
+    history: List[Tuple[str, str]] = [(r.role, r.content or "") for r in reversed(rows)]
+    # 去掉末尾刚写入的那条 user 消息（它就是本次提问，run() 内部会再 add_user）
+    while history and history[-1][0] == "user":
+        history.pop()
+    return history
+
+
 def _run_and_persist(request: Request, ctx: Dict[str, Any],
                      on_delta: Optional[Callable[[str], None]]) -> ChatResponse:
     """在工作线程里执行 Agent，并把消息、工具调用、审计、配额落库。"""
@@ -511,8 +538,10 @@ def _run_and_persist(request: Request, ctx: Dict[str, Any],
     t0 = time.perf_counter()
 
     confirmed = ConfirmationStore(db).load(ctx["user_id"])
-    agent, tracer, registry = runtime.build_agent(ctx["vehicle_model"], confirmed, on_delta,
-                                                  idempotency_key=ctx.get("idempotency_key") or "")
+    history = _load_history(db, ctx["session_id"])
+    agent, tracer, registry = runtime.build_agent(
+        ctx["vehicle_model"], confirmed, on_delta,
+        idempotency_key=ctx.get("idempotency_key") or "", history=history)
     # on_delta 必须传进 run()：AgentGraph 据此把最终答案改为流式生成（SSE 的 token 来源）
     state = agent.run(ctx["message"], on_delta=on_delta)
 

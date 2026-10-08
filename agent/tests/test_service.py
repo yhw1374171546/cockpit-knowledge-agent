@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from fastapi.testclient import TestClient                                   # noqa: E402
 
 from agent.llm import LLMBackend, LLMResponse, ToolCall                     # noqa: E402
-from agent.service.app import create_app                                    # noqa: E402
+from agent.service.app import _load_history, create_app                     # noqa: E402
 from agent.service.config import Settings                                   # noqa: E402
 from agent.service.db import SessionRow, ToolCallRow                        # noqa: E402
 from agent.service.security import IdempotencyStore                         # noqa: E402
@@ -425,6 +425,39 @@ class TestSessionIsolation(ServiceTestBase):
             row = db.get(SessionRow, body["session_id"])
             self.assertIsNotNone(row)
             self.assertEqual(row.user_id, "u1")
+
+
+class TestMultiTurnMemory(ServiceTestBase):
+    """会话记忆必须**落库并回填**——否则服务层的多轮是断的。
+
+    这是本项目的真实缺口：`sessions`/`messages` 表存了历史，但每个请求都新建
+    一份空的 `ConversationMemory`，于是"它怎么关闭"这类追问无法解析指代。
+    """
+
+    def test_history_is_loaded_from_db(self):
+        first = self.chat("座椅加热怎么关闭").json()
+        sid = first["session_id"]
+        history = _load_history(self.app.state.db, sid)
+        self.assertTrue(history, "会话历史没有从数据库读出来")
+        self.assertEqual(history[0][0], "user")
+        self.assertIn("座椅加热", history[0][1])
+
+    def test_pronoun_followup_resolves_with_context(self):
+        """追问用代词时，应能借助历史解析指代（否则会答成域外拒答）。"""
+        sid = self.chat("座椅加热怎么关闭").json()["session_id"]
+        follow = self.chat("它怎么重新打开", session_id=sid).json()
+        self.assertEqual(follow["session_id"], sid)
+        # 有上下文时不该直接拒答
+        self.assertNotEqual(follow["answer"].strip(), "无答案",
+                            f"追问被拒答，说明上下文没生效：{follow}")
+
+    def test_history_is_capped(self):
+        """历史不能无限增长（成本与上下文都要控）。"""
+        sid = self.chat("座椅加热怎么关闭").json()["session_id"]
+        for i in range(4):
+            self.chat(f"第{i}个问题：危险警告灯怎么开", session_id=sid)
+        history = _load_history(self.app.state.db, sid, max_turns=3)
+        self.assertLessEqual(len(history), 6, "历史轮数未被裁剪")
 
 
 if __name__ == "__main__":

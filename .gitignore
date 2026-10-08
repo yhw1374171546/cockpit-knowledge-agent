@@ -25,6 +25,16 @@ eval/*.md
 # ── 求职材料（简历、分析报告、课程原始文档备份）──
 docs/
 
+# ── 密钥与本地配置（★ 绝对不能入库）──
+# 明文放本地文件是常规做法，前提是它必须被这里排除；模板 .env.example 可以入库。
+.env
+.env.*
+!.env.example
+*.local.json
+*.local.yaml
+secrets/
+*.key
+
 # ── Python 缓存 ──
 __pycache__/
 *.py[cod]

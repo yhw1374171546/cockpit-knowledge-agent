@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 import re
 import time
@@ -74,6 +75,85 @@ def estimate_tokens(text: str) -> int:
     cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
     other = len(text) - cjk
     return max(1, int(cjk / 1.6 + other / 4.0))
+
+
+def redact(text: Any) -> str:
+    """抹掉疑似密钥，保证凭证不随异常/日志/报告外泄。
+
+    服务层与评测脚本的所有异常信息都应经过它——否则一次 401 就可能把 key
+    打进 CI 日志或评测报告里（这类事故在真实项目里很常见）。
+    """
+    s = str(text)
+    s = re.sub(r"sk-[A-Za-z0-9_\-]{4,}", "sk-***REDACTED***", s)
+    s = re.sub(r"(Bearer\s+)[A-Za-z0-9_\-\.]{8,}", r"\1***REDACTED***", s)
+    return s
+
+
+# 各家 provider 的默认连接参数（评测脚本与服务层共用，避免把 key 写进代码）
+PROVIDER_PRESETS: Dict[str, Dict[str, Any]] = {
+    "vllm": {"base_url": "http://127.0.0.1:8000/v1", "model": "Qwen2_5_7B_Instruct",
+             "api_key_env": "", "thinking": "", "cost_in": 0.0, "cost_out": 0.0},
+    # 价格随官方调整，这里只作为"成本预估"的默认值，以官网为准
+    # https://api-docs.deepseek.com/quick_start/pricing/
+    "deepseek": {"base_url": "https://api.deepseek.com", "model": "deepseek-flash",
+                 "api_key_env": "DEEPSEEK_API_KEY", "thinking": "disabled",
+                 "cost_in": 0.15, "cost_out": 0.60},
+    "deepseek-pro": {"base_url": "https://api.deepseek.com", "model": "deepseek-v4-pro",
+                     "api_key_env": "DEEPSEEK_API_KEY", "thinking": "disabled",
+                     "cost_in": 0.66, "cost_out": 1.98},
+    "openai": {"base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini",
+               "api_key_env": "OPENAI_API_KEY", "thinking": "",
+               "cost_in": 0.15, "cost_out": 0.60},
+}
+
+
+def build_llm(provider: str = "vllm", model: str = "", base_url: str = "",
+              api_key: str = "", thinking: str = "", strict_tools: bool = False,
+              timeout: int = 120) -> OpenAICompatibleLLM:
+    """按 provider 构建后端：自动填 base_url/model/密钥环境变量/价格。
+
+    `api_key` 留空时从 `api_key_env` 指定的环境变量读取（推荐做法：key 只放环境变量，
+    或放本地 .env 后由脚本读入环境变量，绝不写进代码或提交进仓库）。
+    """
+    preset = PROVIDER_PRESETS.get(provider, PROVIDER_PRESETS["vllm"])
+    key = api_key or (os.environ.get(preset["api_key_env"], "") if preset["api_key_env"]
+                      else "EMPTY")
+    if preset["api_key_env"] and not key:
+        raise RuntimeError(
+            f"provider={provider} 需要 API key：请设置环境变量 {preset['api_key_env']}"
+            f"（或把 key 写进本地 .env，由脚本读入；注意 .env 已在 .gitignore 中）")
+    return OpenAICompatibleLLM(
+        base_url=base_url or preset["base_url"],
+        model=model or preset["model"],
+        api_key=key or "EMPTY",
+        timeout=timeout,
+        provider=provider,
+        thinking=thinking or preset["thinking"],
+        strict_tools=strict_tools,
+        cost_per_1m_in=preset["cost_in"],
+        cost_per_1m_out=preset["cost_out"],
+    )
+
+
+def load_dotenv(path: str = ".env") -> int:
+    """极简 .env 读取（零依赖）：KEY=VALUE 逐行写入 os.environ，已存在的变量不覆盖。
+
+    key 明文放本地文件是常规做法，**前提是该文件在 .gitignore 里**（本仓库已包含）。
+    """
+    if not path or not os.path.isfile(path):
+        return 0
+    count = 0
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            name, _, value = line.partition("=")
+            name, value = name.strip(), value.strip().strip('"').strip("'")
+            if name and name not in os.environ:
+                os.environ[name] = value
+                count += 1
+    return count
 
 
 class LLMBackend:
@@ -219,63 +299,150 @@ def _similarity(a: str, b: str) -> float:
 
 
 class OpenAICompatibleLLM(LLMBackend):
+    """OpenAI 兼容后端：本地 vLLM / 云端 OpenAI / DeepSeek 共用一套实现。
+
+    **不同厂商的参数不通用**，所以用 `provider` 做隔离（这是接入真实 API 时最容易踩的坑）：
+    | provider | 约束解码 | 思考模式 | 备注 |
+    | --- | --- | --- | --- |
+    | `vllm` | `guided_json` + `guided_decoding_backend=xgrammar` | 无 | 本地部署 |
+    | `deepseek` | `response_format={"type":"json_object"}`；strict 模式需 `/beta` | `thinking` 参数（**默认开启**） | 支持 Function Calling |
+    | `openai` | 不发送厂商专属字段 | 无 | 通用兜底 |
+
+    安全约定：`api_key` 只用于 `Authorization` 头，**绝不写日志**；
+    异常信息统一过 `redact()`，防止密钥随报错泄漏到日志/报告里。
+    """
+
     name = "openai-compatible"
 
     def __init__(self, base_url: str = "http://127.0.0.1:8000/v1", model: str = "Qwen2_7B",
                  api_key: str = "EMPTY", timeout: int = 120,
-                 known_tools: Optional[Sequence[str]] = None, max_repair_retries: int = 1):
+                 known_tools: Optional[Sequence[str]] = None, max_repair_retries: int = 1,
+                 provider: str = "vllm", thinking: str = "", strict_tools: bool = False,
+                 cost_per_1m_in: float = 0.0, cost_per_1m_out: float = 0.0):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
         self.timeout = timeout
         self.repair = ToolCallRepair(known_tools)
         self.max_repair_retries = max_repair_retries
+        self.provider = (provider or "vllm").lower()
+        self.thinking = (thinking or "").lower()      # "" | "enabled" | "disabled"
+        self.strict_tools = strict_tools
+        self.cost_per_1m_in = cost_per_1m_in
+        self.cost_per_1m_out = cost_per_1m_out
+        # 成本账本：评测跑完后可直接报"这套评测花了多少钱"
+        self.usage: Dict[str, Any] = {"calls": 0, "prompt_tokens": 0,
+                                      "completion_tokens": 0, "cost_usd": 0.0}
 
     def set_known_tools(self, names: Sequence[str]) -> None:
         """把工具清单告诉修复器，用于纠正模型幻觉出来的工具名。"""
         self.repair.known_tools = list(names)
 
-    def chat(self, messages, tools=None, temperature=0.0, max_tokens=1024,
-             guided_json=None) -> LLMResponse:
+    # ── 厂商适配 ──
+    @staticmethod
+    def to_strict_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
+        """把 JSON Schema 转成 DeepSeek strict 模式要求的形状。
+
+        strict 模式要求：每个 object 的**所有属性都必须出现在 required 里**，
+        且 `additionalProperties=false`。⚠️ 副作用：可选参数会被强制生成，
+        模型可能"编造"一个值。所以默认关闭，作为 A/B 实验项而非默认路径。
+        """
+        if not isinstance(schema, dict):
+            return schema
+        out = dict(schema)
+        if out.get("type") == "object" or "properties" in out:
+            props = {k: OpenAICompatibleLLM.to_strict_schema(v)
+                     for k, v in (out.get("properties") or {}).items()}
+            out["properties"] = props
+            out["required"] = list(props.keys())
+            out["additionalProperties"] = False
+        if "items" in out:
+            out["items"] = OpenAICompatibleLLM.to_strict_schema(out["items"])
+        for key in ("anyOf", "oneOf", "allOf"):
+            if key in out:
+                out[key] = [OpenAICompatibleLLM.to_strict_schema(s) for s in out[key]]
+        return out
+
+    def _prepare_tools(self, tools):
+        if not self.strict_tools:
+            return tools
+        prepared = []
+        for spec in tools:
+            item = json.loads(json.dumps(spec, ensure_ascii=False))
+            fn = item.get("function", {})
+            fn["strict"] = True
+            if "parameters" in fn:
+                fn["parameters"] = self.to_strict_schema(fn["parameters"])
+            prepared.append(item)
+        return prepared
+
+    def _build_payload(self, messages, tools, temperature, max_tokens, guided_json,
+                       stream: bool = False) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "model": self.model,
             "messages": list(messages),
-            "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        # 思考模式下 temperature 无效（DeepSeek 文档明确说明），因此只在非思考模式发送
+        if self.thinking != "enabled":
+            payload["temperature"] = temperature
         if tools:
-            payload["tools"] = tools
+            payload["tools"] = self._prepare_tools(tools)
             payload["tool_choice"] = "auto"
         if guided_json is not None:
-            # vLLM 原生约束解码：让模型输出严格符合 JSON Schema，从源头减少解析失败
-            payload["guided_json"] = guided_json
-            payload.setdefault("guided_decoding_backend", "xgrammar")
+            if self.provider == "vllm":
+                # vLLM 原生约束解码：从源头保证输出符合 JSON Schema
+                payload["guided_json"] = guided_json
+                payload.setdefault("guided_decoding_backend", "xgrammar")
+            elif self.provider == "deepseek":
+                # 云端用 JSON Output（strict 模式走 /beta + tools[].strict）
+                payload["response_format"] = {"type": "json_object"}
+        if self.thinking:
+            # DeepSeek：{"thinking": {"type": "enabled"|"disabled"}}，默认 enabled/effort=high
+            payload["thinking"] = {"type": self.thinking}
+        if stream:
+            payload["stream"] = True
+        return payload
+
+    def _post(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         req = urllib.request.Request(
             f"{self.base_url}/chat/completions",
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"},
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {self.api_key}"},
             method="POST",
         )
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                body = json.loads(resp.read().decode("utf-8"))
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            try:
+                detail = exc.read().decode("utf-8", "ignore")[:400]
+            except Exception:                              # noqa: BLE001
+                pass
+            raise RuntimeError(redact(
+                f"LLM 服务返回 HTTP {exc.code}（provider={self.provider}）：{detail}")) from None
         except urllib.error.URLError as exc:
-            raise RuntimeError(f"调用 LLM 服务失败：{exc}") from exc
+            raise RuntimeError(redact(
+                f"无法连接 LLM 服务 {self.base_url}：{exc.reason}")) from None
 
+    def chat(self, messages, tools=None, temperature=0.0, max_tokens=1024,
+             guided_json=None) -> LLMResponse:
+        body = self._post(self._build_payload(messages, tools, temperature, max_tokens,
+                                              guided_json))
         return self._parse_body(body)
 
     # ── 流式：用于首字延迟（TTFT）优化 ──
     def stream_chat(self, messages, tools=None, temperature=0.0, max_tokens=1024,
                     ) -> Iterator[StreamChunk]:
-        payload = {"model": self.model, "messages": list(messages),
-                   "temperature": temperature, "max_tokens": max_tokens, "stream": True}
-        if tools:
-            payload["tools"] = tools
-            payload["tool_choice"] = "auto"
+        payload = self._build_payload(messages, tools, temperature, max_tokens, None,
+                                      stream=True)
         req = urllib.request.Request(
             f"{self.base_url}/chat/completions",
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"},
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {self.api_key}"},
             method="POST",
         )
         start = time.perf_counter()
@@ -296,8 +463,16 @@ class OpenAICompatibleLLM(LLMBackend):
                     yield StreamChunk(delta=delta.get("content") or "",
                                       done=False,
                                       elapsed_ms=(time.perf_counter() - start) * 1000)
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            try:
+                detail = exc.read().decode("utf-8", "ignore")[:400]
+            except Exception:                              # noqa: BLE001
+                pass
+            raise RuntimeError(redact(
+                f"LLM 流式服务返回 HTTP {exc.code}：{detail}")) from None
         except urllib.error.URLError as exc:
-            raise RuntimeError(f"调用 LLM 流式服务失败：{exc}") from exc
+            raise RuntimeError(redact(f"无法连接 LLM 流式服务：{exc.reason}")) from None
         yield StreamChunk(done=True, elapsed_ms=(time.perf_counter() - start) * 1000)
 
     def _parse_body(self, body: Dict[str, Any]) -> LLMResponse:
@@ -311,9 +486,23 @@ class OpenAICompatibleLLM(LLMBackend):
             name = self.repair.fix_name(fn.get("name", ""))
             calls.append(ToolCall(name, args, tc.get("id", f"call_{i}"),
                                   repaired=repaired, raw_arguments=str(raw)[:200]))
+        usage = body.get("usage") or {}
+        self._account(usage)
         return LLMResponse(content=message.get("content"), tool_calls=calls,
                            finish_reason=choice.get("finish_reason", "stop"),
-                           usage=body.get("usage") or {})
+                           usage=usage)
+
+    def _account(self, usage: Dict[str, Any]) -> None:
+        pin = int(usage.get("prompt_tokens") or 0)
+        pout = int(usage.get("completion_tokens") or 0)
+        self.usage["calls"] = int(self.usage["calls"]) + 1
+        self.usage["prompt_tokens"] = int(self.usage["prompt_tokens"]) + pin
+        self.usage["completion_tokens"] = int(self.usage["completion_tokens"]) + pout
+        self.usage["cost_usd"] = float(self.usage["cost_usd"]) + (
+            pin / 1e6 * self.cost_per_1m_in + pout / 1e6 * self.cost_per_1m_out)
+
+    def cost_report(self) -> Dict[str, Any]:
+        return dict(self.usage)
 
 
 # ── 测试：脚本回放 ────────────────────────────────────────────────────

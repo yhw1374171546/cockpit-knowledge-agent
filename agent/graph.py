@@ -245,7 +245,8 @@ class AgentGraph:
                 messages.append({"role": "assistant", "content": None,
                                  "tool_calls": [reflect_call.to_openai()]})
                 verdict = reflect_call.arguments.get("verdict", "sufficient")
-                messages.append({"role": "tool", "name": "__reflect__",
+                messages.append({"role": "tool", "tool_call_id": reflect_call.id,
+                                 "name": "__reflect__",
                                  "content": json.dumps({"ok": True, "verdict": verdict},
                                                        ensure_ascii=False)})
                 state.trace.append({"node": "reflector", "step": state.steps, "verdict": verdict})
@@ -315,7 +316,8 @@ class AgentGraph:
                 observation = result.to_observation()
                 if self.isolate_evidence and result.ok:
                     observation = self._isolate_observation(observation, result)
-                messages.append({"role": "tool", "name": call.name, "content": observation})
+                messages.append({"role": "tool", "tool_call_id": call.id,
+                                 "name": call.name, "content": observation})
 
                 if result.ok and not result.repeated:
                     progressed = True
