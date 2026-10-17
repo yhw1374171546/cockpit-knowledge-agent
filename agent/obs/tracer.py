@@ -70,6 +70,16 @@ class Tracer:
         self._lock = threading.Lock()
         self._stack: List[str] = []
 
+    # ── 导出 ──
+    def span_dicts(self) -> List[Dict[str, Any]]:
+        """把 spans 导出成可 JSON 序列化的列表（供 trace 落库 / 会话回放使用）。
+
+        以前 trace 只在内存里，请求结束就没了：线上出问题只能靠日志猜，
+        也没法把某个用户的会话按顺序回放一遍。落库需要这一步导出。
+        """
+        with self._lock:
+            return [sp.to_dict() for sp in self.spans]
+
     # ── span ──
     @contextmanager
     def span(self, name: str, agent: str = "agent", **attrs: Any) -> Iterator[Span]:

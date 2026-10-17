@@ -95,5 +95,14 @@ jobs:
           python -m alembic -x db_url=sqlite:////tmp/ci_mig.db upgrade head
           python agent/tests/test_migrations.py
 
+      - name: Background tasks and trace replay (BE3 + BE4)
+        run: python agent/tests/test_tasks_and_traces.py
+
+      - name: SSE reconnect / cancellation (BE7)
+        run: python agent/tests/test_sse.py
+
+      - name: Vector index persistence and incremental (BE2/③)
+        run: python agent/tests/test_vector_store.py
+
       - name: Metrics gate (skips missing, fails on regression)
         run: python eval/ci_gate.py

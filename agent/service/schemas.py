@@ -135,3 +135,10 @@ class ShutdownPrepareRequest(BaseModel):
     reason: str = Field("prestop", description="停机原因，写进审计")
     grace_s: float = Field(0.0, ge=0.0, le=600.0,
                            description="排空等待上限（秒）；0 表示用服务端默认 SERVICE_SHUTDOWN_GRACE_S")
+
+
+class TaskCreateRequest(BaseModel):
+    """提交后台任务。kind: noop（验证）| kb_build（注册知识库版本）"""
+    kind: str = Field(..., description="任务类型：noop / kb_build")
+    payload: Dict[str, Any] = Field(default_factory=dict,
+                                    description="任务参数，如 kb_build 的 {path, vehicle_model, version}")

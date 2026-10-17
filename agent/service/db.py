@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from contextlib import contextmanager
 from datetime import date, datetime
@@ -216,6 +217,93 @@ def load_kb_versions(db: "Database") -> List[Dict[str, object]]:
                  "path": r.source_file or "", "checksum": r.checksum or "",
                  "n_chunks": int(r.n_chunks or 0), "status": r.status or "",
                  "traffic_pct": int(r.traffic_pct or 100)} for r in rows]
+
+
+class TaskRow(Base):
+    """后台任务（BE3）：长时间操作（建索引、批量评测）不在请求线程里做。"""
+    __tablename__ = "tasks"
+    id = Column(String(32), primary_key=True)          # uuid hex
+    kind = Column(String(32), index=True)
+    payload = Column(Text, default="")
+    status = Column(String(16), index=True, default="queued")   # queued|running|succeeded|failed
+    attempts = Column(Integer, default=0)
+    error = Column(Text, default="")
+    result = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    started_at = Column(DateTime, nullable=True)
+    finished_at = Column(DateTime, nullable=True)
+
+
+class TraceRow(Base):
+    """一次请求的完整追踪快照（BE4）：spans + 决策轨迹 + 成本。
+
+    以前 trace 只在内存里、随请求结束就没了：线上出问题只能靠日志猜，
+    也没法"把某个用户的会话按顺序回放一遍"。
+    """
+    __tablename__ = "traces"
+    id = Column(Integer, primary_key=True)
+    trace_id = Column(String(36), index=True)
+    session_id = Column(String(64), index=True, default="")
+    user_id = Column(String(64), index=True, default="")
+    vehicle_model = Column(String(64), default="")
+    kb_version = Column(String(64), default="")
+    status = Column(String(16), default="")
+    failure = Column(String(64), default="")
+    tokens_in = Column(Integer, default=0)
+    tokens_out = Column(Integer, default=0)
+    cost_usd = Column(Float, default=0.0)
+    latency_ms = Column(Float, default=0.0)
+    payload = Column(Text, default="")                 # JSON：spans + state.trace + reflection
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
+def save_trace_in_session(session, *, trace_id: str, session_id: str, user_id: str,
+                          vehicle_model: str, kb_version: str, status: str,
+                          failure: str, tokens_in: int, tokens_out: int,
+                          cost_usd: float, latency_ms: float,
+                          payload: Dict[str, object]) -> None:
+    """在**当前事务内**写一条 trace（跟着业务数据一起提交，避免多开事务）。"""
+    session.add(TraceRow(
+        trace_id=trace_id, session_id=session_id, user_id=user_id,
+        vehicle_model=vehicle_model, kb_version=kb_version, status=status,
+        failure=failure, tokens_in=int(tokens_in), tokens_out=int(tokens_out),
+        cost_usd=float(cost_usd), latency_ms=float(latency_ms),
+        payload=json.dumps(payload, ensure_ascii=False, default=str)))
+
+
+def load_trace(db: "Database", trace_id: str) -> Optional[Dict[str, object]]:
+    """按 trace_id 取一条追踪快照（含完整 payload）。"""
+    with db.session() as session:
+        row = (session.query(TraceRow).filter(TraceRow.trace_id == trace_id)
+               .order_by(TraceRow.id.desc()).first())
+        if row is None:
+            return None
+        payload: object = {}
+        if row.payload:
+            try:
+                payload = json.loads(row.payload)
+            except (ValueError, TypeError):
+                payload = {"raw": row.payload}
+        return {"trace_id": row.trace_id, "session_id": row.session_id,
+                "user_id": row.user_id, "vehicle_model": row.vehicle_model,
+                "kb_version": row.kb_version, "status": row.status,
+                "failure": row.failure, "tokens_in": row.tokens_in,
+                "tokens_out": row.tokens_out, "cost_usd": row.cost_usd,
+                "latency_ms": row.latency_ms, "payload": payload,
+                "created_at": row.created_at.timestamp() if row.created_at else None}
+
+
+def list_session_traces(db: "Database", session_id: str, limit: int = 50) -> List[Dict[str, object]]:
+    """按会话列出追踪（**时间正序**，用于"把这个会话从头回放一遍"）。"""
+    with db.session() as session:
+        rows = (session.query(TraceRow).filter(TraceRow.session_id == session_id)
+                .order_by(TraceRow.id.asc()).limit(limit).all())
+        return [{"trace_id": r.trace_id, "status": r.status, "failure": r.failure,
+                 "tokens_in": r.tokens_in, "tokens_out": r.tokens_out,
+                 "cost_usd": r.cost_usd, "latency_ms": r.latency_ms,
+                 "kb_version": r.kb_version,
+                 "created_at": r.created_at.timestamp() if r.created_at else None}
+                for r in rows]
 
 
 class Database:

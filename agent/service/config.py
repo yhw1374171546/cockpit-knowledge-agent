@@ -83,6 +83,10 @@ class Settings:
     semantic_cache_ttl_s: float = 3600.0
     semantic_cache_shared: bool = True       # True=落 KV（多副本共享）；False=纯进程内
 
+    # 后台任务队列（BE3）：索引构建/批量评测异步化
+    enable_task_worker: bool = True
+    task_poll_s: float = 0.5
+
     # 表结构：开发/测试自动建表；**生产应置 0 并先跑 alembic upgrade head**
     auto_create_schema: bool = True
 
@@ -145,6 +149,9 @@ class Settings:
             semantic_cache_ttl_s=_float("SERVICE_SEMANTIC_CACHE_TTL_S", 3600.0),
             semantic_cache_shared=os.environ.get("SERVICE_SEMANTIC_CACHE_SHARED", "1").lower()
             not in ("0", "false"),
+            enable_task_worker=os.environ.get("SERVICE_TASK_WORKER", "1").lower()
+            not in ("0", "false"),
+            task_poll_s=_float("SERVICE_TASK_POLL_S", 0.5),
             auto_create_schema=os.environ.get("SERVICE_AUTO_CREATE_SCHEMA", "1").lower()
             not in ("0", "false"),
             sse_buffer_streams=_int("SERVICE_SSE_BUFFER_STREAMS", 256),

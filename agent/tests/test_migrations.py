@@ -105,10 +105,21 @@ class TestAlembicMigrations(unittest.TestCase):
             self.assertIn(expected, cols, f"kb_versions 缺少列 {expected}")
 
     def test_downgrade_rolls_back_columns(self):
+        """回滚能把"新增列"撤销掉。
+
+        注意：**不要用 `downgrade -1` 断言"列消失"**——一旦在加列那条之上又加了新迁移
+        （比如 tasks/traces），`-1` 只会回滚最新那一版，列还在。
+        这里逐版回滚直到列消失，既不写死版本数，也不会被后续迁移搞坏。
+        """
         self.assertEqual(self._alembic("upgrade", "head").returncode, 0)
-        self.assertEqual(self._alembic("downgrade", "-1").returncode, 0)
-        cols = self._columns("kb_versions")
-        self.assertNotIn("version", cols, "回滚后仍保留新增列")
+        self.assertIn("version", self._columns("kb_versions"))
+
+        for _ in range(10):
+            if "version" not in self._columns("kb_versions"):
+                break
+            if self._alembic("downgrade", "-1").returncode != 0:
+                break
+        self.assertNotIn("version", self._columns("kb_versions"), "回滚后仍保留新增列")
 
     def test_offline_sql_generation(self):
         """离线模式只生成 SQL、不连库——CI 用它快速校验迁移脚本可解析。"""

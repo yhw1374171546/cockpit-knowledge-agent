@@ -55,9 +55,12 @@ from agent.service.db import (
     SessionRow,
     ToolCallRow,
     get_database,
+    list_session_traces,
     load_kb_versions,
+    load_trace,
     record_kb_version,
     reset_database,
+    save_trace_in_session,
 )
 from agent.service.faults import DegradingLLM, FaultyLLM
 from agent.service.kb_registry import KBRegistry
@@ -76,6 +79,7 @@ from agent.service.schemas import (
     KBRollbackRequest,
     SessionInfo,
     ShutdownPrepareRequest,
+    TaskCreateRequest,
     TokenRequest,
     TokenResponse,
     ToolCallInfo,
@@ -89,6 +93,7 @@ from agent.service.security import (
     RateLimiter,
 )
 from agent.service.sse import SSEReplayBuffer
+from agent.service.tasks import TaskQueue, TaskWorker, make_kb_build_handler, make_noop_handler
 from agent.tools import ToolRegistry, build_default_registry
 
 logger = logging.getLogger("agent.service")
@@ -397,6 +402,15 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         if restored:
             logger.info("已从 kb_versions 表恢复 %d 条版本状态", restored)
         app.state.kb_registry = kb_registry
+        # ── 后台任务队列（BE3）──
+        app.state.task_queue = TaskQueue(db)
+        app.state.task_worker = None
+        if settings.enable_task_worker:
+            handlers = {"noop": make_noop_handler(),
+                        "kb_build": make_kb_build_handler(kb_registry)}
+            app.state.task_worker = TaskWorker(app.state.task_queue, handlers,
+                                              poll_s=settings.task_poll_s)
+            app.state.task_worker.start()
         app.state.started_at = time.time()
         # 停机状态（BE8）：inflight 是"正在处理中的请求数"，drain 靠它判断能不能退出
         app.state.inflight = 0
@@ -422,6 +436,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             yield
         finally:
             # 优雅停机：先摘流量（/readyz 已因 shutting_down 返回 503），再等排空，最后关资源。
+            # 先停后台 worker：避免把正在建索引的任务硬切（它不在 inflight 计数里）
+            worker = getattr(app.state, "task_worker", None)
+            if worker is not None:
+                worker.stop()
+                worker.join(timeout=5)
             prepare_shutdown(app, "lifespan_exit", settings.shutdown_grace_s)
             drained = drain(app, settings.shutdown_grace_s)
             with app.state.inflight_lock:
@@ -711,6 +730,62 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             db.add(Feedback(message_id=body.message_id, user_id=principal.user_id,
                             rating=body.rating, comment=body.comment[:1000]))
         return {"ok": True}
+
+    # ── 后台任务（BE3）──
+    @app.post("/v1/admin/tasks", tags=["ops"], summary="提交后台任务（如 kb_build）")
+    async def create_task(request: Request, body: TaskCreateRequest,
+                          principal: Principal = Depends(principal_of)):
+        _require_service(principal)
+        queue = getattr(request.app.state, "task_queue", None)
+        if queue is None:
+            raise HTTPException(status_code=503, detail="任务队列不可用")
+        info = queue.enqueue(body.kind, body.payload)
+        METRICS.inc("agent_task_submitted_total", {"kind": body.kind[:32]})
+        _audit(request, principal, "task_submit", info.id,
+               {"kind": body.kind, "payload": body.payload})
+        return info.to_dict()
+
+    @app.get("/v1/admin/tasks", tags=["ops"], summary="列出后台任务")
+    async def list_tasks(request: Request, limit: int = 20, kind: str = "",
+                         status: str = "", principal: Principal = Depends(principal_of)):
+        _require_service(principal)
+        queue = getattr(request.app.state, "task_queue", None)
+        if queue is None:
+            raise HTTPException(status_code=503, detail="任务队列不可用")
+        return {"tasks": queue.list(limit=limit, kind=kind, status=status),
+                "stats": queue.stats()}
+
+    @app.get("/v1/admin/tasks/{task_id}", tags=["ops"], summary="查询任务状态与结果")
+    async def get_task(request: Request, task_id: str,
+                       principal: Principal = Depends(principal_of)):
+        _require_service(principal)
+        queue = getattr(request.app.state, "task_queue", None)
+        if queue is None:
+            raise HTTPException(status_code=503, detail="任务队列不可用")
+        info = queue.get(task_id)
+        if info is None:
+            raise HTTPException(status_code=404, detail=f"任务不存在：{task_id}")
+        return info.to_dict()
+
+    # ── 追踪回放（BE4）──
+    @app.get("/v1/admin/traces/{trace_id}", tags=["ops"], summary="按 trace_id 取追踪快照")
+    async def get_trace(request: Request, trace_id: str,
+                        principal: Principal = Depends(principal_of)):
+        _require_service(principal)
+        record = load_trace(_db(request), trace_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail=f"追踪不存在：{trace_id}")
+        return record
+
+    @app.get("/v1/admin/sessions/{session_id}/traces", tags=["ops"],
+             summary="按会话回放（时间正序）")
+    async def get_session_traces(request: Request, session_id: str, limit: int = 50,
+                                 principal: Principal = Depends(principal_of)):
+        _require_service(principal)
+        records = list_session_traces(_db(request), session_id, limit)
+        return {"session_id": session_id, "n": len(records),
+                "total_cost_usd": round(sum(r["cost_usd"] for r in records), 6),
+                "traces": records}
 
     # ── 停机准备（供 K8s preStop / 发布脚本调用）──
     @app.post("/v1/admin/shutdown/prepare", tags=["ops"], summary="进入停机准备（摘流量+排空）")
@@ -1109,6 +1184,24 @@ def _run_and_persist(request: Request, ctx: Dict[str, Any],
                                      after={"ok": ok, "blocked": blocked,
                                             "args": call.get("arguments")},
                                      trace_id=ctx["trace_id"])
+        # ── trace 落库（BE4）──
+        # 同一事务写入：trace 与业务数据要么一起成功、要么一起回滚，
+        # 不会出现"有答案没 trace"或"有 trace 没消息"的对不上账。
+        save_trace_in_session(
+            session, trace_id=ctx["trace_id"], session_id=ctx["session_id"],
+            user_id=ctx["user_id"], vehicle_model=ctx["vehicle_model"],
+            kb_version=kb_version, status=state.status, failure=failure or "",
+            tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=cost,
+            latency_ms=latency_ms,
+            payload={"route": state.route, "steps": state.steps, "retries": state.retries,
+                     "reflection": state.reflection, "gate_coverage": state.gate_coverage,
+                     "trace": state.trace, "spans": tracer.span_dicts()
+                     if hasattr(tracer, "span_dicts") else [],
+                     "tool_calls": state.tool_calls,
+                     "injection_risk": state.injection_risk,
+                     "risk_level": state.risk_level,
+                     "resolved_question": state.resolved_question,
+                     "cached": cache_hit})
         session.query(SessionRow).filter(SessionRow.id == ctx["session_id"]).update(
             {"updated_at": dt.datetime.utcnow()})
         # 配额与幂等完成也进同一事务（读一次写一次，不再各开一个事务）
