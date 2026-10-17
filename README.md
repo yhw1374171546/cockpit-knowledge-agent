@@ -992,6 +992,37 @@ python agent/tests/test_service.py      # 29 项进程内接口测试（CI 用�
 
 ---
 
+## 19.8 仓库卫生与静态检查（以及它抓出的 3 个真 bug）
+
+以前 CI 只有 `compileall`，等于**没有 lint**。补上 `ruff + mypy` 后，立刻抓出三个功能测试抓不到的问题：
+
+| # | 问题 | 抓它的规则 | 为什么功能测试抓不到 |
+| --- | --- | --- | --- |
+| 1 | **预算传播从未生效**：`child = budget.slice(...)` 算完就丢，子 Agent 各自新建全量预算 | ruff F841 | 子 Agent 用**全量**预算跑**指标更好**——"错了但看起来更好" |
+| 2 | **`next_action` 在空答案分支根本不是 `"refuse"`**：位置参数错位（`"refuse"` 落进 list 字段） | mypy arg-type | 这条分支只在"答案为空"时走，正常路径测不到 |
+| 3 | **`RedisKV.get` 可能返回 `bytes`**：一旦 `decode_responses` 被改，上层 JSON/TTL 静默出错 | mypy return-value | 默认配置下不触发 |
+
+> 三个都补了回归断言（`TestBudgetPropagation` / `TestReflectionNoAnswerPath` / kv 归一化）。
+> **共同点：它们都不是"算错了"，而是"算了但没接上"——功能测试只能验证行为对不对，
+> 验证不了"该用的机制有没有被用上"。**
+
+配置取舍（都写在 `pyproject.toml` 注释里）：
+- **ruff 不含 `UP`（pyupgrade）**：项目刻意保留 `typing.List/Optional` 与 utf-8 文件头，开 UP 会产生 700+ 处纯风格改写，风险大于收益；
+- **mypy 渐进覆盖 10 个核心模块**（本机验证零错误）+ `follow_imports = "silent"`；其余模块待 SQLAlchemy 迁移到 `Mapped[T]` 后再纳入——那里 40 个错大多是 `Column[str]` vs `str`，靠 `# type: ignore` 糊过去没有意义；
+- **Python 下限提到 3.10**：代码使用 `zip(strict=...)`，CI 矩阵同步为 `["3.10", "3.12"]`；
+- **`.pre-commit-config.yaml`** 挂 ruff + 空白/文件尾/大文件检查，`legacy/` 排除。
+
+> ⚠️ 过程中自己踩的坑（也记进了复盘文档）：批量给 23 处 `zip()` 加 `strict=True` 时，
+> 有 1 处的两个序列**设计上就不等长**（`counts` 比 `buckets` 多一个 `+Inf` 桶），
+> 直接把 `/metrics` 打成 500。**自动修复工具改的是语法一致性，它不知道语义差异**——
+> 改完必须跑全量回归。
+
+**仓库结构也顺手理清了**：课程原始 RAG 链路（`pdf_parse.py`/`bm25_retriever.py`/`vllm_model.py` 等 11 个文件）
+归档到 `legacy/` 并附 `legacy/README.md`（说清"这是改造前基线，只为对照与溯源，CI 不覆盖"），
+旧 `Dockerfile` 改名 `Dockerfile.vllm` 以区别于 `Dockerfile.service`，`.gitignore` 补齐运行时与构建产物。
+
+---
+
 ## 二十、致谢与说明
 
 - 语料版权归领克汽车销售有限公司所有，本项目仅用于**技术学习与研究**，仓库不含语料。
