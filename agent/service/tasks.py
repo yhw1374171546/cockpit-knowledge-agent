@@ -62,14 +62,18 @@ class TaskInfo:
 
 
 def _row_to_info(row: TaskRow) -> TaskInfo:
+    # 显式类型转换：SQLAlchemy 的 Column[...] 在静态类型里不是裸 str/int，直接传会报 arg-type；
+    # 顺手也让"数据库里冒出 NULL"这种情况不至于把接口炸掉。
+    raw_result: object = row.result
     result = None
-    if row.result:
+    if raw_result:
         try:
-            result = json.loads(row.result)
+            result = json.loads(str(raw_result))
         except (ValueError, TypeError):
-            result = {"raw": row.result}
-    return TaskInfo(id=row.id, kind=row.kind, status=row.status,
-                    attempts=int(row.attempts or 0), error=row.error or "",
+            result = {"raw": str(raw_result)}
+    return TaskInfo(id=str(row.id or ""), kind=str(row.kind or ""),
+                    status=str(row.status or ""),
+                    attempts=int(row.attempts or 0), error=str(row.error or ""),
                     result=result,
                     created_at=row.created_at.timestamp() if row.created_at else None,
                     started_at=row.started_at.timestamp() if row.started_at else None,
