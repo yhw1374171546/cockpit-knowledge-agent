@@ -105,5 +105,6 @@ files = [
     "agent/service/kb_registry.py",
     "agent/service/kv.py",
     "agent/service/sse.py",
+    "agent/service/tasks.py",
     "agent/service/metrics.py",
 ]
