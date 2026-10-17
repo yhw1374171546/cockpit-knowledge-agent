@@ -76,6 +76,13 @@ class Settings:
     fault_sleep_s: float = 0.05
     enable_degradation: bool = True   # 主后端失败时回退到离线规则规划器
 
+    # ── 语义缓存（座舱重复率高：命中即省一次检索 + 一次大模型调用）──
+    enable_semantic_cache: bool = True
+    semantic_cache_threshold: float = 0.92   # 宁严不宽：防"近似但答错题"（座舱答错代价高）
+    semantic_cache_max_entries: int = 512
+    semantic_cache_ttl_s: float = 3600.0
+    semantic_cache_shared: bool = True       # True=落 KV（多副本共享）；False=纯进程内
+
     # 指标暴露：默认仅 service/admin 可访问；置 1 则公开（Prometheus 抓取用）
     metrics_public: bool = False
 
@@ -119,6 +126,13 @@ class Settings:
             fault_rate=_float("SERVICE_FAULT_RATE", 0.0),
             fault_sleep_s=_float("SERVICE_FAULT_SLEEP_S", 0.05),
             enable_degradation=os.environ.get("SERVICE_ENABLE_DEGRADATION", "1").lower()
+            not in ("0", "false"),
+            enable_semantic_cache=os.environ.get("SERVICE_SEMANTIC_CACHE", "1").lower()
+            not in ("0", "false"),
+            semantic_cache_threshold=_float("SERVICE_SEMANTIC_CACHE_THRESHOLD", 0.92),
+            semantic_cache_max_entries=_int("SERVICE_SEMANTIC_CACHE_MAX_ENTRIES", 512),
+            semantic_cache_ttl_s=_float("SERVICE_SEMANTIC_CACHE_TTL_S", 3600.0),
+            semantic_cache_shared=os.environ.get("SERVICE_SEMANTIC_CACHE_SHARED", "1").lower()
             not in ("0", "false"),
             metrics_public=os.environ.get("SERVICE_METRICS_PUBLIC", "0").lower() in ("1", "true"),
             kb_path=os.environ.get("AGENT_KB_PATH", ""),

@@ -568,5 +568,222 @@ class TestMultiTurnMemory(ServiceTestBase):
         self.assertLessEqual(len(history), 6, "历史轮数未被裁剪")
 
 
+class TestSemanticCacheWiring(ServiceTestBase):
+    """语义缓存**接线**测试。
+
+    为什么单独一组：这个能力在 `agent/cache.py` 里一直存在、也有单测和基准，
+    但**从来没接进服务链路**——基准里能测出"命中 66.67%、token −66.7%"，
+    线上却一次都没生效。这就是"有基准 ≠ 有缓存"，和"有信号 ≠ 有防御"是同一类问题。
+    所以这里的断言必须证明**大模型调用真的被跳过了**，而不只是"查过一次缓存"。
+    """
+
+    def _counting_chat(self, questions, **body):
+        """带计数的对话：统计 AgentGraph.run 被调用几次。"""
+        from unittest import mock
+
+        from agent.graph import AgentGraph
+
+        calls = {"n": 0}
+        original = AgentGraph.run
+
+        def counted(self_agent, *args, **kwargs):
+            calls["n"] += 1
+            return original(self_agent, *args, **kwargs)
+
+        responses = []
+        with mock.patch.object(AgentGraph, "run", counted):
+            for question in questions:
+                responses.append(self.chat(question, **body))
+        return responses, calls["n"]
+
+    def test_hit_skips_agent_run_and_tokens(self):
+        """同一个问题问两遍：第二次必须**完全不执行 Agent**（tokens/cost 归零）。"""
+        (r1, r2), n_runs = self._counting_chat(["座椅加热怎么关闭", "座椅加热怎么关闭"])
+        self.assertEqual(r1.status_code, 200, r1.text)
+        self.assertEqual(r2.status_code, 200, r2.text)
+        first, second = r1.json(), r2.json()
+        self.assertFalse(first["cached"], "第一次不该命中缓存")
+        self.assertTrue(second["cached"], "第二次应命中语义缓存")
+        self.assertEqual(n_runs, 1, f"Agent 被执行了 {n_runs} 次，缓存没真正短路")
+        self.assertEqual(second["tokens_out"], 0, "命中缓存时不应产生输出 token")
+        self.assertEqual(second["cost_usd"], 0.0)
+
+    def test_fuzzy_hit_on_similar_wording(self):
+        """措辞相近（只差语气词）也应命中——这是语义缓存相对精确匹配的价值。"""
+        (r1, r2), n_runs = self._counting_chat(
+            ["座椅加热怎么关闭", "座椅加热怎么关闭呢？"])
+        self.assertFalse(r1.json()["cached"])
+        self.assertTrue(r2.json()["cached"], "近似问法未命中")
+        self.assertEqual(n_runs, 1)
+
+    def test_antonym_not_served_from_cache(self):
+        """反义守卫：'怎么关闭' 与 '怎么打开' 答案相反，绝不能互串。"""
+        (r1, r2), n_runs = self._counting_chat(
+            ["座椅加热怎么关闭", "座椅加热怎么打开"])
+        self.assertFalse(r1.json()["cached"])
+        self.assertFalse(r2.json()["cached"], "反义问法被错误命中（事故级）")
+        self.assertEqual(n_runs, 2)
+
+    def test_isolated_between_tenants(self):
+        """不同车型租户不共享缓存条目（手册版本/政策口径可能不同）。"""
+        r1 = self.chat("座椅加热怎么关闭", headers=self.h)
+        self.assertFalse(r1.json()["cached"])
+        token09 = self._token("u1", "driver", "lynk09")
+        r2 = self.chat("座椅加热怎么关闭", headers=self._auth_headers(token09))
+        self.assertFalse(r2.json()["cached"], "跨租户命中了别人的缓存")
+
+    def test_refusal_not_cached(self):
+        """拒答不入缓存：否则会把一次失败固化成长期答案。"""
+        (r1, r2), n_runs = self._counting_chat(
+            ["中国足球的队长是谁", "中国足球的队长是谁"])
+        self.assertNotEqual(r1.json()["status"], "answered")
+        self.assertFalse(r2.json()["cached"], "拒答被缓存了")
+        self.assertEqual(n_runs, 2)
+
+    def test_multi_turn_not_cached(self):
+        """带历史的请求不查缓存：同一句在不同上下文里含义可能不同。"""
+        from agent.graph import AgentGraph
+        from unittest import mock
+
+        calls = {"n": 0}
+        original = AgentGraph.run
+
+        def counted(self_agent, *args, **kwargs):
+            calls["n"] += 1
+            return original(self_agent, *args, **kwargs)
+
+        with mock.patch.object(AgentGraph, "run", counted):
+            first = self.chat("座椅加热怎么关闭")
+            sid = first.json()["session_id"]
+            self.chat("座椅加热怎么关闭", session_id=sid)
+        self.assertEqual(calls["n"], 2, "多轮请求错误地命中了缓存")
+        self.assertFalse(first.json()["cached"])
+
+    def test_cache_metrics_exposed(self):
+        """缓存命中必须能在 /metrics 里看到（否则线上无法判断它是否生效）。"""
+        self.chat("座椅加热怎么关闭")
+        self.chat("座椅加热怎么关闭")
+        # /metrics 需要 service/admin 角色（避免把内部指标暴露给普通用户）
+        svc_token = self._token("svc", "service", "lynk08")
+        body = self.client.get("/metrics", headers=self._auth_headers(svc_token)).text
+        self.assertIn("agent_cache_lookups_total", body)
+        self.assertIn('result="exact"', body)
+
+    def test_stream_cache_hit_emits_delta_immediately(self):
+        """SSE 路径也要吃到缓存：命中时必须有 delta（否则前端只等到 done，等于没有流式）。"""
+        self.chat("座椅加热怎么关闭")                     # 先暖一次
+        with self.client.stream("POST", "/v1/chat/stream",
+                                json={"message": "座椅加热怎么关闭"}, headers=self.h) as resp:
+            events = [line for line in resp.iter_lines() if line]
+        text = "\n".join(events if isinstance(events[0], str) else
+                         [e.decode("utf-8", "ignore") for e in events])
+        self.assertIn("event: delta", text.replace("event:delta", "event: delta"),
+                      "缓存命中时没有推送 delta")
+        self.assertIn('"cached": true', text.replace('"cached":true', '"cached": true'))
+
+
+class TestSharedSemanticCache(unittest.TestCase):
+    """共享模式：多副本共用一份 KV，一个副本写入、另一个副本能命中。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.path = os.path.join(self._tmp.name, "kv_shared.db")
+
+    def tearDown(self):
+        for store in getattr(self, "_stores", []):
+            try:
+                store.close()
+            except Exception:                                    # noqa: BLE001
+                pass
+        self._tmp.cleanup()
+
+    def _kv(self):
+        from agent.service.kv import build_kv
+
+        store = build_kv("sqlite", sqlite_path=self.path)
+        self._stores = getattr(self, "_stores", []) + [store]
+        return store
+
+    def test_cross_instance_hit(self):
+        from agent.cache import SemanticCache
+
+        kv = self._kv()
+        a = SemanticCache(kv=kv)
+        b = SemanticCache(kv=kv)          # 模拟另一个副本
+        self.assertTrue(a.shared)
+
+        a.put("座椅加热怎么关闭", "在多媒体显示屏的座舱体验-座椅界面里关闭。",
+              citations=["manual.pdf 第12页"], fingerprint="fp1", scope="lynk08")
+        hit = b.get("座椅加热怎么关闭", "fp1", scope="lynk08")
+        self.assertTrue(hit.hit, "另一个副本没有命中共享缓存")
+        self.assertEqual(hit.kind, "exact")
+        self.assertIn("座椅", hit.entry.answer)
+
+    def test_cross_instance_antonym_guard(self):
+        """共享模式同样要过反义守卫（不能因为换了存储就把安全设计丢了）。"""
+        from agent.cache import SemanticCache
+
+        kv = self._kv()
+        a = SemanticCache(kv=kv)
+        b = SemanticCache(kv=kv)
+        a.put("座椅加热怎么关闭", "答案A", fingerprint="fp1", scope="lynk08")
+        hit = b.get("座椅加热怎么打开", "fp1", scope="lynk08")
+        self.assertFalse(hit.hit, "共享模式下反义问法被命中")
+
+    def test_cross_instance_scope_isolation(self):
+        from agent.cache import SemanticCache
+
+        kv = self._kv()
+        a = SemanticCache(kv=kv)
+        b = SemanticCache(kv=kv)
+        a.put("座椅加热怎么关闭", "答案A", fingerprint="fp1", scope="lynk08")
+        self.assertFalse(b.get("座椅加热怎么关闭", "fp1", scope="lynk09").hit,
+                         "不同租户命中了同一份缓存")
+
+    def test_cross_instance_fingerprint_isolation(self):
+        """车况指纹变化（胎压 228→148）必须 miss。"""
+        from agent.cache import SemanticCache
+
+        kv = self._kv()
+        a = SemanticCache(kv=kv)
+        b = SemanticCache(kv=kv)
+        a.put("胎压多少算正常", "标准值 236 kPa", fingerprint="normal", scope="lynk08")
+        self.assertTrue(b.get("胎压多少算正常", "normal", scope="lynk08").hit)
+        self.assertFalse(b.get("胎压多少算正常", "severe", scope="lynk08").hit,
+                         "车况变了还命中了旧答案（座舱里是事故级）")
+
+    def test_ttl_expiry(self):
+        from agent.cache import SemanticCache
+
+        kv = self._kv()
+        cache = SemanticCache(kv=kv, ttl_seconds=0.5)
+        cache.put("座椅加热怎么关闭", "答案", fingerprint="fp1", scope="lynk08")
+        self.assertTrue(cache.get("座椅加热怎么关闭", "fp1", scope="lynk08").hit)
+        import time as _t
+
+        _t.sleep(0.6)
+        self.assertFalse(cache.get("座椅加热怎么关闭", "fp1", scope="lynk08").hit,
+                         "过期条目仍被命中")
+
+    def test_kv_failure_degrades_to_miss(self):
+        """KV 故障时缓存必须降级为 miss，绝不能让请求失败。"""
+        from agent.cache import SemanticCache
+
+        class BrokenKV:
+            def get(self, key):
+                raise RuntimeError("kv down")
+
+            def set(self, key, value, ttl=None):
+                raise RuntimeError("kv down")
+
+            def delete(self, key):
+                raise RuntimeError("kv down")
+
+        cache = SemanticCache(kv=BrokenKV())
+        cache.put("座椅加热怎么关闭", "答案", fingerprint="fp1", scope="lynk08")  # 不抛
+        hit = cache.get("座椅加热怎么关闭", "fp1", scope="lynk08")
+        self.assertFalse(hit.hit)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

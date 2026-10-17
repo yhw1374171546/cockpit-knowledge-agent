@@ -58,7 +58,7 @@ class ChatResponse(BaseModel):
     ttft_ms: Optional[float] = None
     quota: Optional[Dict[str, Any]] = None
     idempotent_replay: bool = False
-    cached: bool = False
+    cached: bool = Field(False, description="本次回答是否直接命中语义缓存（未调用大模型）")
     degraded: bool = Field(False, description="是否走了降级链路（主推理后端不可用）")
     degrade_reason: str = ""
 

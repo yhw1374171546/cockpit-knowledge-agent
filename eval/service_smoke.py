@@ -203,7 +203,13 @@ def main() -> int:
           " → ".join(dict.fromkeys(kinds)))
     deltas = [d for e, d in events if e == "delta"]
     done = [d for e, d in events if e == "done"][0]
-    check("分多块下发", len(deltas) >= 2, f"{len(deltas)} 块")
+    # 缓存命中时整段答案一次性下发（1 个 delta）——这是**预期行为**，不是缺陷：
+    # 前面第 5/6 步已经用同一个问题问过，语义缓存此刻正好命中。
+    # 所以这里的判定是「多块下发」**或**「命中缓存且至少 1 块」。
+    cached = bool(done.get("cached"))
+    check("分多块下发或缓存命中",
+          len(deltas) >= 2 or (cached and len(deltas) >= 1),
+          f"{len(deltas)} 块（cached={cached}）")
     check("拼装结果 = 完整答案",
           "".join(d["text"] for d in deltas) == done["answer"])
     if ttft is not None:
@@ -212,8 +218,20 @@ def main() -> int:
     else:
         check("收到 delta 事件", False, "未收到任何 delta")
 
-    # ── 9. 治理接口 ──
-    print("\n[9] 治理与可观测")
+    # ── 9. 语义缓存（端到端确认它真的接进了请求路径）──
+    print("\n[9] 语义缓存")
+    _, warm1, _ = request(url, "/v1/chat", {"message": "危险警告灯怎么用"}, auth)
+    _, warm2, _ = request(url, "/v1/chat", {"message": "危险警告灯怎么用"}, auth)
+    check("缓存命中标记（第二次）", warm2.get("cached") is True,
+          f"首次 cached={warm1.get('cached')} 二次 cached={warm2.get('cached')}")
+    check("命中时不产生输出 token", warm2.get("tokens_out", 0) == 0,
+          f"tokens_out={warm2.get('tokens_out')}（未命中时为 {warm1.get('tokens_out')}）")
+    _, anti, _ = request(url, "/v1/chat", {"message": "危险警告灯怎么关闭"}, auth)
+    check("反义问法不被缓存串答案", anti.get("cached") is not True,
+          f"cached={anti.get('cached')}（'怎么打开/怎么用' 不得命中 '怎么关闭'）")
+
+    # ── 10. 治理接口 ──
+    print("\n[10] 治理与可观测")
     status, _, _ = request(url, "/v1/admin/metrics", headers=auth)
     check("普通用户禁止访问治理接口 → 403", status == 403, f"HTTP {status}")
     _, admin, _ = request(url, "/v1/auth/token", {"user_id": "smoke-admin", "role": "admin",
@@ -229,8 +247,8 @@ def main() -> int:
     check("审计日志可查", status == 200 and isinstance(audit, list),
           f"{len(audit or [])} 条")
 
-    # ── 10. 限流（用独立用户，避免影响前面的检查）──
-    print("\n[10] 限流")
+    # ── 11. 限流（用独立用户，避免影响前面的检查）──
+    print("\n[11] 限流")
     _, rl_tok, _ = request(url, "/v1/auth/token", {"user_id": "smoke-flood",
                                                    "vehicle_model": "lynk08"})
     rl_h = {"Authorization": f"Bearer {rl_tok['access_token']}"}

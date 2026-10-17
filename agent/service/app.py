@@ -37,7 +37,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
-from agent.graph import AgentConfig, AgentGraph
+from agent.cache import SemanticCache, cacheable_status
+from agent.graph import AgentConfig, AgentGraph, AgentState
 from agent.guardrails.policy import PolicyEngine, ToolPolicy
 from agent.kb import KnowledgeBase
 from agent.llm import (LLMBackend, OpenAICompatibleLLM, RuleBasedPlannerLLM,
@@ -178,6 +179,11 @@ def _kv(request: Request) -> KVStore:
     return request.app.state.kv
 
 
+def _cache(request: Request) -> Optional[SemanticCache]:
+    """语义缓存实例（未启用时返回 None）。"""
+    return getattr(request.app.state, "semantic_cache", None)
+
+
 def principal_of(request: Request,
                  authorization: Optional[str] = Header(None)) -> Principal:
     settings = _settings(request)
@@ -217,15 +223,26 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         app.state.db = db
         app.state.kv = build_kv(settings.kv_backend, settings.redis_url,
                                settings.kv_sqlite_path)
+        # 语义缓存：座舱重复率高，命中一次就省掉「检索 + 一次大模型调用」。
+        # 默认落 KV（多副本共享、进程重启不丢）；`SERVICE_SEMANTIC_CACHE_SHARED=0` 则退回进程内。
+        app.state.semantic_cache = None
+        if settings.enable_semantic_cache:
+            app.state.semantic_cache = SemanticCache(
+                threshold=settings.semantic_cache_threshold,
+                max_entries=settings.semantic_cache_max_entries,
+                ttl_seconds=settings.semantic_cache_ttl_s,
+                kv=app.state.kv if settings.semantic_cache_shared else None)
         app.state.runtime = AgentRuntime(settings)
         app.state.started_at = time.time()
         # 预热默认租户知识库，让 /readyz 有真实含义
         app.state.runtime.kb(settings.default_vehicle_model)
         if settings.jwt_secret == "dev-secret-change-me":
             logger.warning("正在使用默认 JWT 密钥，生产环境请通过 SERVICE_JWT_SECRET 注入")
-        logger.info("服务启动完成 db=%s kv=%s llm=%s",
+        logger.info("服务启动完成 db=%s kv=%s llm=%s cache=%s",
                     db.engine.url.get_backend_name(), app.state.kv.backend(),
-                    settings.llm_backend or "planner")
+                    settings.llm_backend or "planner",
+                    ("shared" if getattr(app.state.semantic_cache, "shared", False)
+                     else ("local" if app.state.semantic_cache else "off")))
         try:
             yield
         finally:
@@ -594,8 +611,39 @@ def _run_and_persist(request: Request, ctx: Dict[str, Any],
     agent, tracer, registry = runtime.build_agent(
         ctx["vehicle_model"], confirmed, on_delta,
         idempotency_key=ctx.get("idempotency_key") or "", history=history)
-    # on_delta 必须传进 run()：AgentGraph 据此把最终答案改为流式生成（SSE 的 token 来源）
-    state = agent.run(ctx["message"], on_delta=on_delta)
+
+    # ── 语义缓存：命中则**完全跳过** agent.run()（省一次检索 + 一次大模型调用）──
+    # 键的作用域是「车型租户」，指纹里包含车况与角色：
+    #   ① 不同租户即使问同一句，也各自独立（手册版本/政策口径可能不同）；
+    #   ② 车况变了（胎压 228→148、告警灯新增）指纹就变，绝不拿旧车况的答案答新状态。
+    cache = _cache(request)
+    fingerprint = SemanticCache.fingerprint(getattr(registry, "telemetry", {}) or {},
+                                            role=getattr(ctx.get("principal"), "role", "driver"))
+    scope = ctx["vehicle_model"]
+    # 有历史的多轮请求不查缓存：同一个问法在不同上下文里的含义可能不同（指代/话题继承）。
+    cacheable_req = (cache is not None and not ctx.get("idempotency_key")
+                     and not history and len(ctx["message"]) >= 4)
+    lookup = (cache.get(ctx["message"], fingerprint, cacheable=cacheable_req, scope=scope)
+              if cache is not None else None)
+    cache_hit = bool(lookup and lookup.hit)
+
+    if cache_hit and lookup is not None and lookup.entry is not None:
+        METRICS.inc("agent_cache_lookups_total", {"result": lookup.kind})
+        entry = lookup.entry
+        state = AgentState(question=ctx["message"], resolved_question=ctx["message"],
+                           route="cache", status=entry.status or "answered",
+                           answer=entry.answer, citations=list(entry.citations))
+        state.trace.append({"node": "semantic_cache", "hit": lookup.kind,
+                            "similarity": lookup.similarity})
+        # 流式接口也要吐 token：直接把缓存答案推给 on_delta，首字延迟≈0
+        if on_delta is not None:
+            on_delta(entry.answer)
+    else:
+        if cache is not None:
+            METRICS.inc("agent_cache_lookups_total",
+                        {"result": lookup.kind if lookup else "off"})
+        # on_delta 必须传进 run()：AgentGraph 据此把最终答案改为流式生成（SSE 的 token 来源）
+        state = agent.run(ctx["message"], on_delta=on_delta)
 
     # 降级统计（主推理后端不可用时回退到了离线规则规划器）
     degraded, degrade_reason = False, ""
@@ -615,6 +663,35 @@ def _run_and_persist(request: Request, ctx: Dict[str, Any],
     for call in state.tool_calls:
         if call["tool"] in WRITE_TOOLS and not call["ok"]:
             needs_confirmation = call["arguments"].get("item")
+
+    # ── 语义缓存写入（只在"这一轮的答案值得复用"时才写）──
+    # 五条排除规则，每条都对应一次真实的风险：
+    #   ① 非 answered（拒答/待确认/出错/步数耗尽）—— 把一次失败固化成长期答案；
+    #   ② 降级产物 —— 故障期间的兜底内容，缓存它会把一次故障的影响延长到 TTL 结束；
+    #   ③ 调用过写操作 —— 写结果是"这一次的事"，不能被下一轮复用（且已被幂等/审计管理）；
+    #   ④ 注入标记 —— 被污染输入产生的答案不可复用；
+    #   ⑤ degraded/needs_confirmation 之外的 safety_injected 不排除：安全指令本来就该复用。
+    if cache is not None and not cache_hit:
+        wrote = any(c["tool"] in WRITE_TOOLS for c in state.tool_calls)
+        blocked_reason = ""
+        if not cacheable_status(state.status):
+            blocked_reason = f"status={state.status}"
+        elif degraded:
+            blocked_reason = "degraded"
+        elif wrote:
+            blocked_reason = "write_tool"
+        elif state.injection_flagged:
+            blocked_reason = "injection_flagged"
+        elif history:
+            blocked_reason = "multi_turn"
+        if blocked_reason:
+            METRICS.inc("agent_cache_skipped_total", {"reason": blocked_reason[:40]})
+            state.trace.append({"node": "semantic_cache", "stored": False,
+                                "reason": blocked_reason})
+        elif cache.put(ctx["message"], state.answer or "", state.citations,
+                       status=state.status, fingerprint=fingerprint, scope=scope) is not None:
+            METRICS.inc("agent_cache_stored_total")
+            state.trace.append({"node": "semantic_cache", "stored": True})
 
     audit = AuditService(db)
     quota_service = QuotaService(db, settings)
@@ -681,6 +758,7 @@ def _run_and_persist(request: Request, ctx: Dict[str, Any],
             tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=cost,
             latency_ms=round(latency_ms, 2), ttft_ms=round(latency_ms, 2),
             degraded=degraded, degrade_reason=degrade_reason,
+            cached=cache_hit,
             quota={"used": quota.used, "limit": quota.limit, "remaining": quota.remaining})
         # 领域指标：token/成本/工具调用/护栏拦截
         METRICS.inc("agent_tokens_total", {"kind": "input"}, tokens_in)
