@@ -86,6 +86,7 @@ from agent.service.security import (
     QuotaService,
     RateLimiter,
 )
+from agent.service.sse import SSEReplayBuffer
 from agent.tools import ToolRegistry, build_default_registry
 
 logger = logging.getLogger("agent.service")
@@ -162,6 +163,8 @@ class AgentRuntime:
         config = AgentConfig()
         # 服务层收紧：写操作必须带 Idempotency-Key（客户端重试不会重复下单）
         config.idempotency_key = idempotency_key
+        # 断连取消：线程安全的 Event，Agent 在每一步之前检查
+        config.cancel_event = None
         memory = ConversationMemory(profile=VehicleProfile(model=vehicle_model))
         # 会话记忆落库回填：没有这一步，服务层的多轮是**断的**——
         # `sessions`/`messages` 表里存了历史，但每个请求都新建一份空记忆，
@@ -304,8 +307,21 @@ def _trace_id(request: Request) -> str:
     return getattr(request.state, "trace_id", uuid.uuid4().hex[:16])
 
 
-def _sse(event: str, data: Dict[str, Any]) -> str:
-    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
+def _sse(event: str, data: Dict[str, Any], event_id: Optional[int] = None,
+         retry_ms: Optional[int] = None) -> str:
+    """构造一个 SSE 事件。
+
+    `id:` 是**断线重连的关键**：客户端重连时会把最后收到的 id 放进 `Last-Event-ID` 头，
+    服务端据此补发后续事件（否则重连只能从头来，等于再付一次钱）。
+    `retry:` 告诉客户端断线后多久重连（只发一次即可）。
+    """
+    head = ""
+    if event_id is not None:
+        head += f"id: {event_id}\n"
+    if retry_ms is not None:
+        head += f"retry: {retry_ms}\n"
+    payload = json.dumps(data, ensure_ascii=False, default=str)
+    return f"{head}event: {event}\ndata: {payload}\n\n"
 
 
 # ── 应用工厂 ─────────────────────────────────────────────────────────
@@ -350,6 +366,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         app.state.shutting_down = False
         app.state.shutdown_reason = ""
         app.state.shutdown_deadline = 0.0
+        # SSE 重放缓冲（BE7）：按 trace_id 保存最近事件，供断线重连补发
+        app.state.sse_buffer = SSEReplayBuffer(
+            max_streams=settings.sse_buffer_streams,
+            max_events=settings.sse_buffer_events,
+            ttl_s=settings.sse_buffer_ttl_s)
         # 预热默认租户知识库，让 /readyz 有真实含义
         app.state.runtime.kb(settings.default_vehicle_model)
         if settings.jwt_secret == "dev-secret-change-me":
@@ -518,8 +539,15 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         q: "queue.Queue[Tuple[str, Any]]" = queue.Queue()
         t0 = time.perf_counter()
         first_delta = {"ms": None}
+        # 断连取消（BE7）：客户端断开后置位，Agent 在下一步之前退出，不再产生新的模型调用
+        cancel = threading.Event()
+        ctx["cancel_event"] = cancel
+        buffer: SSEReplayBuffer = request.app.state.sse_buffer
+        stream_id = ctx["trace_id"]
 
         def on_delta(text: str) -> None:
+            if cancel.is_set():
+                return                                  # 已断开：不再往队列里堆
             if first_delta["ms"] is None:
                 first_delta["ms"] = (time.perf_counter() - t0) * 1000
             q.put(("delta", text))
@@ -534,16 +562,57 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             finally:
                 q.put(("__end__", None))
 
+        # ── 断线重连：同一个 trace_id（X-Trace-Id 头）+ Last-Event-ID 才能找回原流 ──
+        last_event_id = request.headers.get("Last-Event-ID")
+        replayed, was_done = ([], False)
+        if last_event_id is not None and buffer.has(stream_id):
+            try:
+                replayed, was_done = buffer.replay(stream_id, int(last_event_id))
+            except (TypeError, ValueError):
+                replayed, was_done = buffer.replay(stream_id, None)
+            METRICS.inc("agent_sse_reconnect_total", {"completed": str(was_done).lower()})
+            logger.info("SSE 重连 stream=%s last_event=%s 补发=%d 原流已完成=%s",
+                        stream_id, last_event_id, len(replayed), was_done)
+
+        if replayed and was_done:
+            # 原流已经跑完：直接把剩余事件补发完就结束——**不重跑 Agent，不再花钱**
+            async def replay_only():
+                for chunk in replayed:
+                    yield chunk
+            return StreamingResponse(replay_only(), media_type="text/event-stream",
+                                     headers={"Cache-Control": "no-cache",
+                                              "X-Accel-Buffering": "no",
+                                              "X-Trace-Id": stream_id})
+
         thread = threading.Thread(target=work, daemon=True)
         thread.start()
 
         async def event_gen():
-            yield _sse("meta", {"trace_id": ctx["trace_id"], "session_id": ctx["session_id"],
-                                "vehicle_model": ctx["vehicle_model"],
-                                "model": settings.llm_backend or "planner"})
-            yield _sse("stage", {"name": "retrieval", "status": "start",
-                                 "label": "正在查询手册与车况…"})
+            buffer.open(stream_id)
+            seq = {"n": 0}
+
+            def emitted(chunk: str) -> str:
+                """编号 + 入缓冲：断线后客户端凭 id 续传。"""
+                seq["n"] += 1
+                buffer.append(stream_id, seq["n"], chunk)
+                return chunk
+
+            yield emitted(_sse("meta", {"trace_id": ctx["trace_id"],
+                                        "session_id": ctx["session_id"],
+                                        "vehicle_model": ctx["vehicle_model"],
+                                        "model": settings.llm_backend or "planner"},
+                               event_id=seq["n"] + 1, retry_ms=2000))
+            yield emitted(_sse("stage", {"name": "retrieval", "status": "start",
+                                         "label": "正在查询手册与车况…"}, event_id=seq["n"] + 1))
             while True:
+                # 客户端断开 → 立刻取消上游（不再发起新的模型调用），并让缓冲记成"中断"
+                if await request.is_disconnected():
+                    cancel.set()
+                    buffer.close(stream_id, completed=False)
+                    METRICS.inc("agent_sse_disconnected_total")
+                    logger.info("SSE 客户端断开 stream=%s 已取消上游 seq=%s",
+                                stream_id, seq["n"])
+                    return
                 try:
                     kind, value = q.get_nowait()
                 except queue.Empty:
@@ -554,22 +623,29 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 if kind == "__end__":
                     break
                 if kind == "delta":
-                    yield _sse("delta", {"text": value,
-                                         "elapsed_ms": round((time.perf_counter() - t0) * 1000, 2)})
+                    yield emitted(_sse("delta",
+                                       {"text": value,
+                                        "elapsed_ms": round((time.perf_counter() - t0) * 1000, 2)},
+                                       event_id=seq["n"] + 1))
             thread.join(timeout=5)
             if "error" in holder:
-                yield _sse("error", {"error": holder["error"], "trace_id": ctx["trace_id"]})
+                buffer.close(stream_id, completed=False)
+                yield emitted(_sse("error", {"error": holder["error"],
+                                             "trace_id": ctx["trace_id"]},
+                                    event_id=seq["n"] + 1))
                 return
             result: ChatResponse = holder["result"]
             result.ttft_ms = round(first_delta["ms"], 2) if first_delta["ms"] else result.latency_ms
             if first_delta["ms"]:
                 METRICS.observe_ttft(first_delta["ms"] / 1000.0)     # SSE 首字延迟直方图
-            yield _sse("citations", {"citations": result.citations,
-                                     "risk_level": result.risk_level})
+            yield emitted(_sse("citations", {"citations": result.citations,
+                                              "risk_level": result.risk_level},
+                                event_id=seq["n"] + 1))
             done_payload = result.model_dump()
             # 停机中完成的流：明确告诉客户端"这条流是被停机收尾的"，便于它决定是否重连取剩余内容
             done_payload["shutdown"] = bool(getattr(request.app.state, "shutting_down", False))
-            yield _sse("done", done_payload)
+            buffer.close(stream_id, completed=True)
+            yield emitted(_sse("done", done_payload, event_id=seq["n"] + 1))
 
         return StreamingResponse(event_gen(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache",
@@ -856,6 +932,8 @@ def _run_and_persist(request: Request, ctx: Dict[str, Any],
         ctx["vehicle_model"], confirmed, on_delta,
         idempotency_key=ctx.get("idempotency_key") or "", history=history,
         kb=versioned_kb)
+    # 断连取消（BE7）：流式端点会把这个 Event 放进 ctx；非流式请求为 None
+    agent.config.cancel_event = ctx.get("cancel_event")
 
     # ── 语义缓存：命中则**完全跳过** agent.run()（省一次检索 + 一次大模型调用）──
     # 键的作用域是「车型租户」，指纹里包含车况与角色：

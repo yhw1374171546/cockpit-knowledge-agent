@@ -96,5 +96,6 @@ files = [
     "agent/service/config.py",
     "agent/service/kb_registry.py",
     "agent/service/kv.py",
+    "agent/service/sse.py",
     "agent/service/metrics.py",
 ]

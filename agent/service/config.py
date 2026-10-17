@@ -83,6 +83,11 @@ class Settings:
     semantic_cache_ttl_s: float = 3600.0
     semantic_cache_shared: bool = True       # True=落 KV（多副本共享）；False=纯进程内
 
+    # SSE 断线重连（BE7）：事件缓冲的容量上限（按流、按事件）与 TTL
+    sse_buffer_streams: int = 256
+    sse_buffer_events: int = 512
+    sse_buffer_ttl_s: float = 300.0
+
     # 优雅停机（BE8）：等在途请求排空的上限；超过则强制关闭（不无限拉长停机窗口）
     shutdown_grace_s: float = 20.0
 
@@ -137,6 +142,9 @@ class Settings:
             semantic_cache_ttl_s=_float("SERVICE_SEMANTIC_CACHE_TTL_S", 3600.0),
             semantic_cache_shared=os.environ.get("SERVICE_SEMANTIC_CACHE_SHARED", "1").lower()
             not in ("0", "false"),
+            sse_buffer_streams=_int("SERVICE_SSE_BUFFER_STREAMS", 256),
+            sse_buffer_events=_int("SERVICE_SSE_BUFFER_EVENTS", 512),
+            sse_buffer_ttl_s=_float("SERVICE_SSE_BUFFER_TTL_S", 300.0),
             shutdown_grace_s=_float("SERVICE_SHUTDOWN_GRACE_S", 20.0),
             metrics_public=os.environ.get("SERVICE_METRICS_PUBLIC", "0").lower() in ("1", "true"),
             kb_path=os.environ.get("AGENT_KB_PATH", ""),

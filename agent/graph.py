@@ -67,6 +67,10 @@ class AgentConfig:
     evidence_overlap_threshold: float = 0.45
     # 服务层可注入 Idempotency-Key：写操作策略据此强制要求幂等键
     idempotency_key: str = ""
+    # 协作式取消（BE7）：客户端断开后置位，Agent 在**每一步之前**检查并提前退出。
+    # 为什么放在循环入口而不是中断线程：线程强杀会留下半写的事务；
+    # 让模型/工具调用在自然的边界处停下，才是干净且省 token 的做法。
+    cancel_event: Any = None
     # 安全硬门控（A2）：critical 场景强制前置安全处置指令。
     # 单 Agent 模式开启（确定性兜底）；**多 Agent 模式下由 safety_critic 负责**，
     # 子 Agent 会把它关掉——否则每个子 Agent 自己就带了安全话术，
@@ -233,6 +237,12 @@ class AgentGraph:
         ]
 
         while state.steps < self.config.max_steps:
+            # 客户端已断开 → 立刻收手（不再发起新的检索/模型调用，省下真金白银）
+            if self._cancelled():
+                state.status = "cancelled"
+                state.trace.append({"node": "cancel", "reason": "client_disconnected",
+                                    "steps": state.steps})
+                return self._finalize(state, NO_ANSWER, mem, start)
             state.steps += 1
             if self.budget is not None:
                 self.budget.step()
@@ -420,6 +430,14 @@ class AgentGraph:
                 isolated_items.append(ev)
         return json.dumps({"ok": True, "data": isolated_items}, ensure_ascii=False)
 
+    def _cancelled(self) -> bool:
+        """是否已被要求取消（客户端断开等）。没有 cancel_event 时恒为 False。"""
+        event = getattr(self.config, "cancel_event", None)
+        try:
+            return bool(event is not None and event.is_set())
+        except Exception:                                      # noqa: BLE001
+            return False
+
     def _finalize(self, state: AgentState, answer: str, mem: ConversationMemory,
                   start: float) -> AgentState:
         answer = (answer or "").strip()
@@ -456,9 +474,12 @@ class AgentGraph:
             state.latency_ms.setdefault("reflection", 0.0)
             state.latency_ms["reflection"] += (time.perf_counter() - t0) * 1000
             state.reflection = reflection.to_dict()
-            # 安全门控已介入时**不因接地失败而拒答**（安全指令本身未必能在手册里找到原文）
+            # 安全门控已介入时**不因接地失败而拒答**（安全指令本身未必能在手册里找到原文）；
+            # 已经被取消（客户端断开）或步数耗尽时同样不拒答——那是**提前结束**，不是"没依据"。
+            # 少了这个守卫，cancelled 会被改写成 refused，调用方就分不清"拒答"和"被取消"。
             if (self.config.refuse_on_insufficient and reflection.verdict == "ungrounded"
-                    and not safety_injected):
+                    and not safety_injected
+                    and state.status not in ("cancelled", "max_steps")):
                 state.trace.append({"node": "refuse", "reason": "ungrounded",
                                     "ratio": round(reflection.grounded_ratio, 3)})
                 state.answer = NO_ANSWER
@@ -468,7 +489,13 @@ class AgentGraph:
                 state.latency_ms["total"] = (time.perf_counter() - start) * 1000
                 return state
 
-        if not state.evidence and answer == NO_ANSWER:
+        # 终态保护：cancelled / max_steps 这类"提前结束"的状态不能被改写成 refused/answered，
+        # 否则调用方（比如 SSE 端点）无法区分"正常拒答"和"被取消"。
+        # 这是被 test_pre_cancelled_agent_exits_immediately 抓出来的：
+        # 取消后 status 变成 'refused'，看起来像是一次正常的拒答。
+        if state.status in ("cancelled", "max_steps"):
+            pass
+        elif not state.evidence and answer == NO_ANSWER:
             state.status = "refused"
         elif state.status not in ("needs_confirmation",):
             state.status = "answered"
