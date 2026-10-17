@@ -6,20 +6,18 @@
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from agent.executor import ToolExecutor                                  # noqa: E402
-from agent.guardrails import PolicyContext                               # noqa: E402
-from agent.kb import KnowledgeBase                                       # noqa: E402
-from agent.llm import (SimulatedToolCallLLM, ToolCall, ToolCallRepair,   # noqa: E402
-                       estimate_tokens)
-from agent.obs import Tracer                                             # noqa: E402
-from agent.tools import ToolRegistry                                     # noqa: E402
+from agent.executor import ToolExecutor  # noqa: E402
+from agent.guardrails import PolicyContext  # noqa: E402
+from agent.kb import KnowledgeBase  # noqa: E402
+from agent.llm import SimulatedToolCallLLM, ToolCall, ToolCallRepair, estimate_tokens  # noqa: E402
+from agent.obs import Tracer  # noqa: E402
+from agent.tools import ToolRegistry  # noqa: E402
 
 KB = None
 TOOLS = ["search_manual", "get_vehicle_status", "lookup_vehicle_spec",

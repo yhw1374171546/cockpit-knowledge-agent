@@ -34,13 +34,13 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from agent.graph import AgentConfig, AgentGraph                  # noqa: E402
-from agent.guardrails import InjectionDetector                   # noqa: E402
-from agent.kb import FIXTURE_KB, KnowledgeBase                   # noqa: E402
-from agent.llm import RuleBasedPlannerLLM, redact                # noqa: E402
-from agent.memory import ConversationMemory, VehicleProfile      # noqa: E402
-from agent.reflection import NO_ANSWER                           # noqa: E402
-from agent.tools import TELEMETRY_PROFILES, ToolRegistry         # noqa: E402
+from agent.graph import AgentConfig, AgentGraph  # noqa: E402
+from agent.guardrails import InjectionDetector  # noqa: E402
+from agent.kb import FIXTURE_KB, KnowledgeBase  # noqa: E402
+from agent.llm import RuleBasedPlannerLLM, redact  # noqa: E402
+from agent.memory import ConversationMemory, VehicleProfile  # noqa: E402
+from agent.reflection import NO_ANSWER  # noqa: E402
+from agent.tools import TELEMETRY_PROFILES, ToolRegistry  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT_JSON = os.path.join(ROOT, "eval", "edge_metrics.json")
@@ -292,7 +292,7 @@ def render_md(summary: Dict, rows: List[Dict], kb_path: str) -> str:
         "# 边界与长尾用例评测报告（自动生成）\n",
         f"- 用例：**{s['n_cases']} 条**，覆盖 {len(s['by_kind'])} 类长尾输入",
         f"- 知识库：`{kb_path}` ｜ 块数 {s['kb_stats']['n_chunks']}",
-        f"- 后端：`planner`（离线规则替身）｜ 编排 `max_steps=6`",
+        "- 后端：`planner`（离线规则替身）｜ 编排 `max_steps=6`",
         f"- 长输入硬上限 `MAX_INPUT_CHARS={MAX_INPUT_CHARS}`"
         f"（超限截断并标记：{s['truncated_inputs'] or '无'}）\n",
         "## 1. 核心指标\n",

@@ -14,9 +14,9 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from agent.kb import MAX_QUERY_CHARS, KnowledgeBase, clamp_query                  # noqa: E402
-from agent.memory import ConversationMemory                                       # noqa: E402
-from agent.reflection import Reflector, parse_citation                            # noqa: E402
+from agent.kb import MAX_QUERY_CHARS, KnowledgeBase, clamp_query  # noqa: E402
+from agent.memory import ConversationMemory  # noqa: E402
+from agent.reflection import Reflector, parse_citation  # noqa: E402
 
 
 class TestTopicSwitchNotInherited(unittest.TestCase):
@@ -252,6 +252,35 @@ class TestSafetyGateAndInputGuard(unittest.TestCase):
                                 f"良性提问被注入护栏误拦：{question}")
             self.assertFalse(state.injection_flagged,
                              f"良性提问被标记为注入：{question}")
+
+
+class TestReflectionNoAnswerPath(unittest.TestCase):
+    """`verify()` 在"答案为空/无答案"这条路径上的字段必须正确。
+
+    这个 bug 是 **mypy 的 arg-type 检查**抓出来的，不是任何功能测试：
+    原来按位置传参 `ReflectionResult("ungrounded", 0.0, [], [], "refuse", {...})`，
+    于是 `"refuse"` 落进了 `unverifiable_citations`（list 字段），
+    `{"reason": ...}` 落进了 `next_action`（str 字段）——
+    **答案为空时 `next_action` 根本不是 "refuse"**，依赖它决定重试/拒答的逻辑会静默走错分支。
+    """
+
+    def test_no_answer_sets_next_action_and_list_fields(self):
+        r = Reflector().verify("无答案", [{"source": "m.pdf", "page": 1, "text": "某段证据"}])
+        self.assertEqual(r.verdict, "ungrounded")
+        self.assertEqual(r.next_action, "refuse", "next_action 被错位覆盖")
+        self.assertIsInstance(r.unverifiable_citations, list,
+                              "unverifiable_citations 必须是 list（曾被塞进字符串 'refuse'）")
+        self.assertEqual(r.unverifiable_citations, [])
+        self.assertEqual(r.invalid_citations, [])
+        self.assertIsInstance(r.detail, dict)
+        self.assertEqual(r.detail.get("reason"), "answer_is_no_answer")
+
+    def test_serialized_form_is_json_safe(self):
+        """to_dict 必须能安全序列化：字段错位时这里会露出"字符串当列表"的马脚。"""
+        payload = Reflector().verify("", []).to_dict()
+        self.assertIsInstance(payload["unverifiable_citations"], list)
+        self.assertEqual(payload["next_action"], "refuse")
+        self.assertIsInstance(payload["detail"], dict)
 
 
 if __name__ == "__main__":

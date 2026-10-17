@@ -139,14 +139,18 @@ class ConversationMemory:
         """从最近一轮用户提问推断话题（`current_topic` 未被显式设置时的兜底）。
 
         修复的缺陷：`needs_context()` 判定"需要上下文"，但 `resolve()` 依赖
-        `self.current_topic`——而它在纯离线链路里**从未被设置**，于是指代消解静默失效
-        （解析结果等于原句，检索不到 → 拒答）。二者是隐性契约，一旦一端没人调用就会
-        出现"看起来支持多轮、实际不支持"的假象。
+        `self.current_topic`；一旦没人设置它（或记忆实例是新建的、历史还没回填），
+        指代消解就静默失效（解析结果等于原句，检索不到 → 拒答）。
+        二者是隐性契约，一端没人调用就会出现"看起来支持多轮、实际不支持"的假象。
+
+        说明：`AgentGraph._finalize()` **确实会**调用 `mem.set_topic()`，所以同一份记忆
+        实例内话题是会累积的；真正会丢的场合是**服务层每个请求新建记忆**——
+        那时必须靠会话历史回填 + 这里的历史兜底。这一点早期注释写错过，已更正。
         """
         for turn in reversed(self.turns):
             if turn.role == "user" and turn.content.strip():
                 return turn.content.strip()
-        return self.current_topic
+        return self.current_topic or ""
 
     def resolve(self, question: str) -> str:
         """把省略/指代问题补全成可检索的独立查询。

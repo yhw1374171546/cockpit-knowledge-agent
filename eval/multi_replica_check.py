@@ -31,10 +31,10 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from fastapi.testclient import TestClient                                          # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
 
-from agent.service.app import create_app                                           # noqa: E402
-from agent.service.config import Settings                                          # noqa: E402
+from agent.service.app import create_app  # noqa: E402
+from agent.service.config import Settings  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIXTURE = os.path.join(ROOT, "eval", "fixtures", "mini_corpus.jsonl")

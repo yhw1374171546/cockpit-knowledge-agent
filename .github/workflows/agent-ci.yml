@@ -15,11 +15,35 @@ on:
   workflow_dispatch:
 
 jobs:
+  # 静态检查单列一个 job：它比测试快得多，失败时能立刻定位是"风格/真 bug"而不是行为回归
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install linters
+        run: |
+          python -m pip install --upgrade pip
+          pip install "ruff>=0.5" "mypy>=1.8"
+
+      - name: Ruff（真问题清单：E/W/F/I/B；配置见 pyproject.toml）
+        run: ruff check .
+
+      - name: Mypy（核心模块，逐步扩容；目标列表见 pyproject.toml）
+        run: mypy
+
   test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.9", "3.12"]
+        # 3.9 已移除：代码使用 `zip(strict=...)`（Python 3.10+ 才有），
+        # 与 pyproject.toml 的 requires-python = ">=3.10" 保持一致。
+        python-version: ["3.10", "3.12"]
 
     steps:
       - uses: actions/checkout@v4
@@ -56,10 +80,13 @@ jobs:
       - name: End-to-end smoke on mini corpus
         run: python eval/ci_smoke.py
 
-      - name: Service layer tests (FastAPI + SSE + idempotency)
+      - name: Service layer tests (FastAPI + SSE + idempotency + semantic cache)
         run: |
           pip install -r requirements-service.txt
           python agent/tests/test_service.py
+
+      - name: Semantic cache wiring bench (HTTP 全链路，命中即省一次模型调用)
+        run: python eval/cache_bench.py
 
       - name: Metrics gate (skips missing, fails on regression)
         run: python eval/ci_gate.py

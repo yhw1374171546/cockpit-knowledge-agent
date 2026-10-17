@@ -2,14 +2,16 @@
 # coding: utf-8
 
 
+import jieba
 from langchain.retrievers import BM25Retriever
 from langchain.schema import Document
+
 from pdf_parse import DataProcess
-import jieba
+
 
 class BM25(object):
 
-    # 遍历文档，首先做分词，然后把分词后的文档和全文文档建立索引和映射关系 
+    # 遍历文档，首先做分词，然后把分词后的文档和全文文档建立索引和映射关系
     def __init__(self, documents):
 
         docs = []

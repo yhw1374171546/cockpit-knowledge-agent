@@ -35,15 +35,14 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from eval.multiturn_set import (CATEGORIES, CATEGORY_LABEL,  # noqa: E402
-                               SAFETY_KEYWORDS, load_cases, stats as set_stats)
-
-from agent.graph import AgentConfig, AgentGraph                       # noqa: E402
-from agent.kb import FIXTURE_KB, KnowledgeBase                        # noqa: E402
-from agent.llm import RuleBasedPlannerLLM, redact                     # noqa: E402
-from agent.memory import ConversationMemory, VehicleProfile           # noqa: E402
-from agent.reflection import NO_ANSWER                                # noqa: E402
-from agent.tools import TELEMETRY_PROFILES, ToolRegistry              # noqa: E402
+from agent.graph import AgentConfig, AgentGraph  # noqa: E402
+from agent.kb import FIXTURE_KB, KnowledgeBase  # noqa: E402
+from agent.llm import RuleBasedPlannerLLM, redact  # noqa: E402
+from agent.memory import ConversationMemory, VehicleProfile  # noqa: E402
+from agent.reflection import NO_ANSWER  # noqa: E402
+from agent.tools import TELEMETRY_PROFILES, ToolRegistry  # noqa: E402
+from eval.multiturn_set import CATEGORIES, CATEGORY_LABEL, SAFETY_KEYWORDS, load_cases  # noqa: E402
+from eval.multiturn_set import stats as set_stats
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT_JSON = os.path.join(ROOT, "eval", "multiturn_metrics.json")
@@ -243,9 +242,9 @@ def render_md(summary: Dict, cases: List[Dict], kb_path: str) -> str:
         f"（其中追问轮 {s['n_followup_turns']} 轮）",
         f"- 知识库：`{kb_path}` ｜ 块数 {s['kb_stats']['n_chunks']} ｜ "
         f"分词 {s['kb_stats']['tokenizer']}",
-        f"- 后端：`planner`（离线规则替身，确定性、零成本、无网络）",
-        f"- 编排：单 Agent + `ConversationMemory`（会话内共享 memory 与工具缓存，模拟真实会话）",
-        f"- 成本：本次为离线替身，无 API 调用、成本 $0.00\n",
+        "- 后端：`planner`（离线规则替身，确定性、零成本、无网络）",
+        "- 编排：单 Agent + `ConversationMemory`（会话内共享 memory 与工具缓存，模拟真实会话）",
+        "- 成本：本次为离线替身，无 API 调用、成本 $0.00\n",
         "## 1. 核心指标\n",
         "| 指标 | 数值 | 样本数 | 说明 |",
         "| --- | --- | --- | --- |",

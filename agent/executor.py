@@ -18,7 +18,7 @@ import hashlib
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence
 
 from agent.guardrails.budget import BudgetTracker

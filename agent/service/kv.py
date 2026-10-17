@@ -92,7 +92,12 @@ class RedisKV:
         self._client = redis.Redis.from_url(url, decode_responses=True)
 
     def get(self, key: str) -> Optional[str]:
-        return self._client.get(key)
+        # 显式归一化到 str：连接串里带了 decode_responses=True，但一旦有人改掉这个参数，
+        # 这里就会返回 bytes，进而让上层的 json.loads / TTL 比较静默出错。
+        value = self._client.get(key)
+        if value is None:
+            return None
+        return value if isinstance(value, str) else value.decode("utf-8", "ignore")
 
     def set(self, key: str, value: str, ttl: Optional[int] = None) -> None:
         self._client.set(key, value, ex=ttl)

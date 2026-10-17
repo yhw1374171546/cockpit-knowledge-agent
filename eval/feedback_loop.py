@@ -242,7 +242,7 @@ def aggregate(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     by_failure: Dict[str, int] = {}
     by_status: Dict[str, int] = {}
     by_tool: Dict[str, int] = {}
-    for attr, row in zip(attributions, rows):
+    for attr, row in zip(attributions, rows, strict=False):
         by_failure[attr["primary"]] = by_failure.get(attr["primary"], 0) + 1
         by_status[row.get("status") or "unknown"] = \
             by_status.get(row.get("status") or "unknown", 0) + 1
@@ -416,7 +416,7 @@ def render_md(collected: Dict[str, Any], agg: Dict[str, Any], rows: List[Dict[st
         lines.append(f"- 本次为 **demo 造数自测**（`--demo-seed`）：写入 {seeded['n']} 条假数据到 "
                      f"`{seeded['db']}`，未触碰真实服务库")
     lines += [
-        f"- 后端/成本：不调用任何模型，**零成本、离线**\n",
+        "- 后端/成本：不调用任何模型，**零成本、离线**\n",
         "## 1. 结果\n",
         "| 指标 | 数值 |", "| --- | --- |",
         f"| 负反馈条数 | {agg['n_feedback']} |",

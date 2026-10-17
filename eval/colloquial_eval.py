@@ -38,14 +38,14 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from eval.colloquial_set import load_cases, stats as set_stats   # noqa: E402
-
-from agent.graph import AgentConfig, AgentGraph                  # noqa: E402
-from agent.kb import FIXTURE_KB, KnowledgeBase                   # noqa: E402
-from agent.llm import RuleBasedPlannerLLM                        # noqa: E402
-from agent.memory import ConversationMemory, VehicleProfile      # noqa: E402
-from agent.reflection import NO_ANSWER                           # noqa: E402
-from agent.tools import ToolRegistry                             # noqa: E402
+from agent.graph import AgentConfig, AgentGraph  # noqa: E402
+from agent.kb import FIXTURE_KB, KnowledgeBase  # noqa: E402
+from agent.llm import RuleBasedPlannerLLM  # noqa: E402
+from agent.memory import ConversationMemory, VehicleProfile  # noqa: E402
+from agent.reflection import NO_ANSWER  # noqa: E402
+from agent.tools import ToolRegistry  # noqa: E402
+from eval.colloquial_set import load_cases  # noqa: E402
+from eval.colloquial_set import stats as set_stats
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT_JSON = os.path.join(ROOT, "eval", "colloquial_metrics.json")
@@ -139,7 +139,7 @@ def merge_pairs(rows_rewrite: List[Dict], rows_plain: List[Dict]) -> Dict[str, A
     能复用同一套口径做冒烟，避免两处各写一份统计而漂移。
     """
     merged, regressions, gains = [], [], []
-    for r_on, r_off in zip(rows_rewrite, rows_plain):
+    for r_on, r_off in zip(rows_rewrite, rows_plain, strict=False):
         item = dict(r_on)
         item["rewrite"] = {k: v for k, v in r_on.items()
                            if k in ("search_query", "hit", "hit_top1", "first_rank",
@@ -237,8 +237,8 @@ def main() -> int:
     delta = cmp_result["delta"]
 
     # 按「改写是否真的命中映射词」分组，解释增益从哪来
-    rw_applicable = [r for r, c in zip(rows_rewrite, cases) if c["rewrite_terms"]]
-    rw_other = [r for r, c in zip(rows_rewrite, cases) if not c["rewrite_terms"]]
+    rw_applicable = [r for r, c in zip(rows_rewrite, cases, strict=False) if c["rewrite_terms"]]
+    rw_other = [r for r, c in zip(rows_rewrite, cases, strict=False) if not c["rewrite_terms"]]
     by_group = {
         "rewrite_mapped": {"n": len(rw_applicable), "with_rewrite": summarize(rw_applicable)},
         "rewrite_unmapped": {"n": len(rw_other), "with_rewrite": summarize(rw_other)},
@@ -296,7 +296,7 @@ def render_md(summary: Dict, merged: List[Dict]) -> str:
         f"- 知识库：`{summary['kb_path']}` ｜ 块数 {summary['kb_stats']['n_chunks']} ｜ "
         f"分词 {summary['kb_stats']['tokenizer']}",
         f"- 检索：BM25（top_k={summary['top_k']}），两组的唯一差别是 query 改写开关",
-        f"- 后端：`planner`（离线规则替身），零成本、确定性\n",
+        "- 后端：`planner`（离线规则替身），零成本、确定性\n",
         "## 1. 核心结论\n",
         f"**query 改写（口语→术语映射）在本次实验里：{verdict}**，"
         f"命中率 {_pct(n['hit_rate'])} → {_pct(w['hit_rate'])}"

@@ -23,9 +23,8 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from agent.service.config import Settings
-from agent.service.db import (AuditLog, Confirmation, Database, IdempotencyKey, Quota)
+from agent.service.db import AuditLog, Confirmation, Database, IdempotencyKey, Quota
 from agent.service.kv import KVStore
-
 
 # ── 限流（固定窗口计数；生产可用 Redis + Lua 做令牌桶更平滑）────────────
 

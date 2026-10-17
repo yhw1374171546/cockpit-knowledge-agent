@@ -1,0 +1,98 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cockpit-knowledge-agent"
+version = "1.0.0"
+description = "智能座舱知识大脑：RAG + 多 Agent + 安全护栏 + 服务化（FastAPI/SSE/幂等/可观测）"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "殷洪午" }]
+keywords = ["agent", "rag", "llm", "function-calling", "multi-agent", "cockpit"]
+
+# 运行期最小依赖（完整版见 requirements.txt / requirements-service.txt）
+dependencies = [
+    "jieba>=0.42",
+    "pdfplumber>=0.10",
+]
+
+[project.optional-dependencies]
+service = [
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "sqlalchemy>=2.0",
+    "pyjwt>=2.8",
+    "httpx>=0.27",
+]
+dev = [
+    "ruff>=0.5",
+    "mypy>=1.8",
+]
+# 需要 GPU / 大模型的路径单独列出，避免默认安装就拉重依赖
+llm = [
+    "openai>=1.30",
+    "torch>=2.1",
+    "transformers>=4.38",
+    "faiss-cpu>=1.8",
+]
+
+[project.urls]
+Repository = "https://github.com/yhw1374171546/cockpit-knowledge-agent"
+
+[tool.setuptools.packages.find]
+# 只有 agent/ 是包；eval/ 是独立脚本，docs/ 不入库，legacy/ 是课程原始基线
+include = ["agent*"]
+namespaces = false
+
+# ── Ruff：静态检查（CI 里跑 `python -m ruff check .`）──
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+# 不检查这些目录：课程原始基线、本地文档、真实语料、模型权重
+extend-exclude = ["legacy", "docs", "kb", "pre_train_model", "data", "images"]
+
+[tool.ruff.lint]
+# 为什么不含 UP（pyupgrade）：本项目刻意保留 `typing.List/Optional` 写法和
+# `# -*- coding: utf-8 -*-` 文件头（与课程原始基线、以及大量 3.9 兼容代码并存）。
+# 打开 UP 会产生 700+ 处纯风格改写，风险大于收益——lint 应该抓**真问题**，
+# 而不是制造一次通篇 diff。UP 的收益等统一迁移到 3.12 时再单独做。
+select = ["E", "F", "W", "I", "B"]
+ignore = [
+    "E501",   # 行宽由 review 把关：中文字符宽度算不准，机器判定误报多
+    "B008",   # FastAPI 的 Depends()/Header() 就是要在默认值里调用
+    "B904",   # 异常链：本项目多数场景刻意不回链（对外只暴露干净信息）
+    "B007",   # 循环变量未使用（解包时常见，且往往可读性更好）
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 测试与评测脚本需要先 sys.path.insert 再 import，E402 在这里是必然的
+"agent/tests/*" = ["E402"]
+"eval/*" = ["E402", "F401", "F841"]
+# 包入口是"再导出"用途，F401 在这里是设计而不是缺陷
+"agent/__init__.py" = ["F401"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_redundant_casts = true
+check_untyped_defs = true
+# 只检查被显式列出的模块的**内部**错误；被导入模块的类型仍会被使用，但不报它们的错。
+# （否则一个 SQLAlchemy Column[str] 的噪音会把整份报告淹没，最后没人看 mypy）
+follow_imports = "silent"
+# 渐进式覆盖：以下 10 个模块当前为**零类型错误**（已本机验证）。
+# 其余模块待 SQLAlchemy 迁移到 `Mapped[T]` 声明式类型后再逐步纳入——
+# 那些报错绝大多数是 `Column[str]` vs `str`，靠 `# type: ignore` 糊过去没有意义。
+files = [
+    "agent/cache.py",
+    "agent/memory.py",
+    "agent/protocols.py",
+    "agent/reflection.py",
+    "agent/guardrails/budget.py",
+    "agent/guardrails/injection.py",
+    "agent/guardrails/policy.py",
+    "agent/service/config.py",
+    "agent/service/kv.py",
+    "agent/service/metrics.py",
+]

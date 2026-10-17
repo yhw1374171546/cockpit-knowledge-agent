@@ -12,14 +12,12 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from agent.agents import (ManualExpert, SafetyCritic, ServiceAdvisor,   # noqa: E402
-                          VehicleControlAgent, assess_telemetry)
-from agent.agents.base import ScopedPlanner                             # noqa: E402
-from agent.kb import KnowledgeBase                                      # noqa: E402
-from agent.obs import Tracer                                            # noqa: E402
-from agent.orchestrator import Supervisor, detect_conflicts             # noqa: E402
-from agent.protocols import (RISK_CRITICAL, RISK_OK, RISK_WARNING,      # noqa: E402
-                             AgentResult, Handoff, SubTask)
+from agent.agents import SafetyCritic, assess_telemetry
+from agent.agents.base import ScopedPlanner  # noqa: E402
+from agent.kb import KnowledgeBase  # noqa: E402
+from agent.obs import Tracer  # noqa: E402
+from agent.orchestrator import Supervisor, detect_conflicts  # noqa: E402
+from agent.protocols import RISK_CRITICAL, RISK_OK, RISK_WARNING, AgentResult  # noqa: E402
 
 KB = None
 NORMAL_TELEMETRY = {
@@ -234,6 +232,44 @@ class TestSupervisorRun(unittest.TestCase):
         self.assertGreater(totals["tokens_total"], 0)
         self.assertGreaterEqual(totals["n_spans"], 2)
         self.assertGreater(st.tokens_total, 0)
+
+
+class TestBudgetPropagation(unittest.TestCase):
+    """预算传播**接线**测试。
+
+    为什么单独一组：`Budget.slice()` 早就算出了子预算，但 `_dispatch` 里算完就丢，
+    子 Agent 内部又各自 `Budget(label=...)` 新建全量预算——**"预算传播"写在代码里却从未生效**。
+    这个 bug 是 lint 的 F841（unused variable）抓出来的，而不是任何功能测试抓到的，
+    因此必须补一条**行为断言**把它锁住：子 Agent 收到的必须是切过的子预算。
+    """
+
+    def setUp(self):
+        self.sup = Supervisor(KB, tracer=Tracer())
+
+    def test_subagents_receive_sliced_budget(self):
+        from unittest import mock
+
+        from agent.agents.base import SubAgent
+        from agent.guardrails.budget import Budget
+
+        seen = []
+        original = SubAgent.run
+
+        def spy(self_agent, handoff, memory=None, budget=None):
+            seen.append(budget)
+            return original(self_agent, handoff, memory=memory, budget=budget)
+
+        parent = Budget(label="supervisor", max_steps=8, max_tokens=12000)
+        self.sup.budget = parent
+        with mock.patch.object(SubAgent, "run", spy):
+            self.sup.run("胎压报警了怎么办，另外座椅加热怎么关闭")
+
+        self.assertTrue(seen, "没有子 Agent 被调用，用例前提不成立")
+        for budget in seen:
+            self.assertIsNotNone(budget, "子 Agent 没有收到子预算（预算传播未接线）")
+            self.assertIsNot(budget, parent, "子 Agent 拿到了父预算本体，应拿切片")
+            self.assertEqual(budget.max_steps, int(parent.max_steps * 0.7))
+            self.assertLess(budget.max_tokens, parent.max_tokens)
 
 
 if __name__ == "__main__":

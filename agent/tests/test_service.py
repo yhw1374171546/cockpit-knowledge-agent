@@ -20,14 +20,14 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from fastapi.testclient import TestClient                                   # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
 
-from agent.llm import LLMBackend, LLMResponse, ToolCall                     # noqa: E402
-from agent.service.app import _load_history, create_app                     # noqa: E402
-from agent.service.config import Settings                                   # noqa: E402
-from agent.service.db import SessionRow, ToolCallRow                        # noqa: E402
-from agent.service.security import IdempotencyStore                         # noqa: E402
-from agent.tools import ToolRegistry, build_default_registry                 # noqa: E402
+from agent.llm import LLMBackend, LLMResponse, ToolCall  # noqa: E402
+from agent.service.app import _load_history, create_app  # noqa: E402
+from agent.service.config import Settings  # noqa: E402
+from agent.service.db import SessionRow, ToolCallRow  # noqa: E402
+from agent.service.security import IdempotencyStore  # noqa: E402
+from agent.tools import build_default_registry  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 FIXTURE = os.path.join(ROOT, "eval", "fixtures", "mini_corpus.jsonl")
@@ -642,8 +642,9 @@ class TestSemanticCacheWiring(ServiceTestBase):
 
     def test_multi_turn_not_cached(self):
         """带历史的请求不查缓存：同一句在不同上下文里含义可能不同。"""
-        from agent.graph import AgentGraph
         from unittest import mock
+
+        from agent.graph import AgentGraph
 
         calls = {"n": 0}
         original = AgentGraph.run

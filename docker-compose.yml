@@ -120,7 +120,7 @@ services:
   vllm:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.vllm
     profiles: ["llm"]
     ports:
       - "8000:8000"

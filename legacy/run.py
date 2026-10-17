@@ -2,24 +2,19 @@
 # coding: utf-8
 
 import json
-import jieba
-import pandas as pd
-import numpy as np
-from tqdm import tqdm
-from langchain.schema import Document
-from langchain.vectorstores import Chroma,FAISS
-from langchain import PromptTemplate, LLMChain
-from langchain.chains import RetrievalQA
 import time
-import re
 
-from vllm_model import ChatLLM
-from rerank_model import reRankLLM
-from faiss_retriever import FaissRetriever
+from langchain import PromptTemplate
+from langchain.chains import RetrievalQA
+
 from bm25_retriever import BM25
+from faiss_retriever import FaissRetriever
 from pdf_parse import DataProcess
+from rerank_model import reRankLLM
+from vllm_model import ChatLLM
 
-# 获取Langchain的工具链 
+
+# 获取Langchain的工具链
 def get_qa_chain(llm, vector_store, prompt_template):
 
     prompt = PromptTemplate(template=prompt_template,

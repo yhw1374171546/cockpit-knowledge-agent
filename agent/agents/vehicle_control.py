@@ -10,8 +10,7 @@ from __future__ import annotations
 from typing import Dict, List, Tuple
 
 from agent.agents.base import SubAgent
-from agent.protocols import (RISK_CRITICAL, RISK_NOTICE, RISK_OK, RISK_WARNING,
-                             AGENT_PRIORITY)
+from agent.protocols import RISK_CRITICAL, RISK_NOTICE, RISK_OK, RISK_WARNING
 
 # 一旦点亮就必须停驶排查的告警（安全红线）
 CRITICAL_WARNINGS = ("制动", "刹车", "安全气囊", "气囊", "高压", "动力电池", "过热",
@@ -104,7 +103,6 @@ class VehicleControlAgent(SubAgent):
                 f"实时车况：{facts}"
         # 关键：结构化工具输出本身就是**证据**。
         # 若只把手册检索块当证据，纯车况问答会被接地校验误判为"无依据"而拒答。
-        telemetry = getattr(self.registry, "telemetry", {}) or {}
         result.evidence = list(result.evidence) + [{
             "text": "实时车况：" + "；".join(result.findings),
             "citation": "[车况接口]",

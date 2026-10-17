@@ -170,14 +170,20 @@ class ConflictReport:
 
 @dataclass
 class CriticVerdict:
-    """安全评审结论。"""
+    """安全评审结论。
+
+    `risk_level` 是**各子 Agent 上报风险的最高档**：以前评委把这个值算出来了却从没带进结论，
+    于是"评审看到的风险"在 trace 里完全不可见（lint 的 F841 把它抓了出来）。
+    """
     verdict: str                  # approve | revise | block
     reasons: List[str] = field(default_factory=list)
     revised_answer: Optional[str] = None
+    risk_level: str = RISK_OK
 
     def to_dict(self) -> Dict[str, Any]:
         return {"verdict": self.verdict, "reasons": self.reasons,
-                "revised": (self.revised_answer or "")[:120]}
+                "revised": (self.revised_answer or "")[:120],
+                "risk_level": self.risk_level}
 
 
 @dataclass

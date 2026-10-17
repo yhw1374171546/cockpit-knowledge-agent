@@ -1,9 +1,8 @@
-from transformers import AutoModelForSequenceClassification, AutoTokenizer
 import os
-import torch
 
-from bm25_retriever import BM25
-from pdf_parse import DataProcess
+import torch
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
 from config import *
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"

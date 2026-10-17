@@ -1,14 +1,12 @@
 import os
-import torch
 import time
 
-from config import *
+import torch
+from transformers import AutoTokenizer, GenerationConfig
 from vllm import LLM, SamplingParams
 
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from transformers import GenerationConfig
-from qwen_generation_utils import make_context, decode_tokens, get_stop_words_ids
-
+from config import *
+from qwen_generation_utils import get_stop_words_ids, make_context
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 

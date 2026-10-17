@@ -24,21 +24,20 @@ from typing import Any, Callable, Dict, List, Optional
 
 from agent.executor import ToolExecutor
 from agent.guardrails.budget import BudgetTracker
-from agent.guardrails.injection import InjectionDetector, isolate_evidence
+from agent.guardrails.injection import BLOCKING_FAMILIES, InjectionDetector, isolate_evidence
 from agent.guardrails.policy import PolicyContext, PolicyEngine
-from agent.llm import LLMBackend, RuleBasedPlannerLLM, ToolCall, estimate_tokens
+from agent.llm import LLMBackend, RuleBasedPlannerLLM, estimate_tokens
 from agent.memory import ConversationMemory
 from agent.obs.tracer import Tracer
+from agent.protocols import RISK_CRITICAL, assess_critical_risk, ensure_safety_directive
 from agent.reflection import NO_ANSWER, Reflector
-from agent.guardrails.injection import BLOCKING_FAMILIES
-from agent.protocols import (RISK_CRITICAL, assess_critical_risk, ensure_safety_directive)
+from agent.tools import ToolRegistry
 
 # 输入侧注入被拦截时的统一话术（不泄露任何车辆/车主信息，也不给外部链接）
 GUARDRAIL_REFUSAL = (
     "抱歉，这个请求我不能执行：它包含把车辆或车主信息对外发送、"
     "或绕过车主确认去执行操作的内容。如果您需要相关服务，"
     "我可以帮您查询官方渠道或预约到店。")
-from agent.tools import ToolRegistry
 
 SYSTEM_PROMPT = """你是智能座舱的车辆助手，服务于车主。请遵守以下规则：
 1. 涉及车辆功能、故障处置、保养要求的问题，必须先调用 search_manual 检索车主手册，只能依据检索到的原文回答。

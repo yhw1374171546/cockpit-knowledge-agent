@@ -38,19 +38,22 @@ from typing import Any, Dict, List
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-from eval.citation_eval import (_LABEL_CASES, label_case, run_live,  # noqa: E402
-                                summarize as cite_summarize)
-from eval.colloquial_eval import compare as cq_compare, evaluate_case  # noqa: E402
-from eval.colloquial_set import load_cases as load_cq, stats as cq_stats   # noqa: E402
-from eval.edge_cases import _CASES as EDGE_CASES, summarize as edge_summarize  # noqa: E402
-from eval.edge_cases import _case_ok                                          # noqa: E402
-from eval.feedback_loop import aggregate, attribute, collect                  # noqa: E402
-from eval.multiturn_eval import run_case, summarize                           # noqa: E402
-from eval.multiturn_set import CATEGORIES, load_cases, stats as mt_stats      # noqa: E402
-
-from agent.kb import FIXTURE_KB, KnowledgeBase                                # noqa: E402
-from agent.llm import RuleBasedPlannerLLM                                     # noqa: E402
-from agent.reflection import Reflector                                        # noqa: E402
+from agent.kb import FIXTURE_KB, KnowledgeBase  # noqa: E402
+from agent.llm import RuleBasedPlannerLLM  # noqa: E402
+from agent.reflection import Reflector  # noqa: E402
+from eval.citation_eval import _LABEL_CASES, label_case, run_live  # noqa: E402
+from eval.citation_eval import summarize as cite_summarize
+from eval.colloquial_eval import compare as cq_compare  # noqa: E402
+from eval.colloquial_eval import evaluate_case
+from eval.colloquial_set import load_cases as load_cq  # noqa: E402
+from eval.colloquial_set import stats as cq_stats
+from eval.edge_cases import _CASES as EDGE_CASES  # noqa: E402
+from eval.edge_cases import _case_ok  # noqa: E402
+from eval.edge_cases import summarize as edge_summarize
+from eval.feedback_loop import aggregate, attribute, collect  # noqa: E402
+from eval.multiturn_eval import run_case, summarize  # noqa: E402
+from eval.multiturn_set import CATEGORIES, load_cases  # noqa: E402
+from eval.multiturn_set import stats as mt_stats
 
 OUT = os.path.join(ROOT, "eval", "eval_extra_smoke_report.json")
 SMOKE_MT_LIMIT = 8          # 多轮：取前 8 条（覆盖 6 类中的前几类，够冒烟）
@@ -131,8 +134,8 @@ def main() -> int:
 
     print("\n[5] 边界与长尾")
     edge_rows = []
-    from agent.guardrails import InjectionDetector                    # noqa: E402
-    from eval.edge_cases import run_case as edge_run                   # noqa: E402
+    from agent.guardrails import InjectionDetector  # noqa: E402
+    from eval.edge_cases import run_case as edge_run  # noqa: E402
     detector = InjectionDetector()
     for case in EDGE_CASES[:SMOKE_EDGE_LIMIT]:
         edge_rows.append(edge_run(kb, case, detector))
@@ -170,7 +173,7 @@ def main() -> int:
     record("无数据时优雅输出", (not collected["exists"]) and collected["rows"] == [],
            f"exists={collected['exists']} rows={len(collected['rows'])}")
     demo_db = os.path.join(tmpdir, "demo.db")
-    from eval.feedback_loop import seed_demo                          # noqa: E402
+    from eval.feedback_loop import seed_demo  # noqa: E402
     seed_demo(demo_db, n=6)
     demo_rows = collect(demo_db, -1, 0)["rows"]
     for row in demo_rows:

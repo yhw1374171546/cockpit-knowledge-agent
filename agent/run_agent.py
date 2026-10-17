@@ -107,8 +107,8 @@ def main():
 
     if args.supervisor:
         # 多 Agent 模式：Supervisor 拆解 → 专家并行处理 → 冲突仲裁 → 安全评审
-        from agent.orchestrator import Supervisor
         from agent.obs import Tracer
+        from agent.orchestrator import Supervisor
         from agent.tools import TELEMETRY_PROFILES
         sup = Supervisor(agent.registry.kb, tracer=Tracer(),
                          telemetry=TELEMETRY_PROFILES[args.telemetry])

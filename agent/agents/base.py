@@ -10,17 +10,17 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, List, Optional, Sequence
 
+from agent.graph import AgentConfig, AgentGraph
 from agent.guardrails.budget import Budget, BudgetTracker
 from agent.guardrails.policy import PolicyEngine
-from agent.graph import AgentConfig, AgentGraph
 from agent.kb import KnowledgeBase
 from agent.llm import LLMBackend, RuleBasedPlannerLLM
 from agent.memory import ConversationMemory, VehicleProfile
 from agent.obs.tracer import Tracer
-from agent.protocols import (AGENT_PRIORITY, RISK_OK, AgentResult, Handoff, SubTask)
-from agent.reflection import NO_ANSWER, Reflector
+from agent.protocols import AGENT_PRIORITY, RISK_OK, AgentResult, Handoff, SubTask
+from agent.reflection import Reflector
 from agent.tools import build_default_registry
 
 
@@ -78,15 +78,22 @@ class SubAgent:
                                 agent_name=self.name)
 
     # ── 对外入口 ──
-    def run(self, handoff: Handoff, memory: Optional[ConversationMemory] = None) -> AgentResult:
+    def run(self, handoff: Handoff, memory: Optional[ConversationMemory] = None,
+            budget: Optional[Budget] = None) -> AgentResult:
+        """执行一个 handoff。
+
+        `budget` 是 Supervisor 用 `Budget.slice()` 切出来的**子预算**。
+        不传时退化为"自己开一个全量预算"——那是单人调试路径，
+        多 Agent 协作时必须传，否则子 Agent 各自烧额度，预算传播等于没做。
+        """
         task = handoff.task
-        budget = BudgetTracker(Budget(label=self.name))
-        self.graph.budget = budget
+        tracker = BudgetTracker(budget or Budget(label=self.name))
+        self.graph.budget = tracker
         self.graph.memory = memory or ConversationMemory(profile=VehicleProfile())
         with self.tracer.span(f"subagent.{self.name}", self.name, task=task.query[:40]) as span:
             state = self.graph.run(task.query)
             span.attrs["status"] = state.status
-            result = self._to_result(task, state, budget)
+            result = self._to_result(task, state, tracker)
         return result
 
     def _to_result(self, task: SubTask, state, budget: BudgetTracker) -> AgentResult:

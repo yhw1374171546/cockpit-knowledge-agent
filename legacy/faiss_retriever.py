@@ -2,11 +2,12 @@
 # coding: utf-8
 
 
-from langchain.schema import Document
-from langchain.vectorstores import Chroma,FAISS
-from langchain.embeddings.huggingface import HuggingFaceEmbeddings
-from pdf_parse import DataProcess
 import torch
+from langchain.embeddings.huggingface import HuggingFaceEmbeddings
+from langchain.schema import Document
+from langchain.vectorstores import FAISS
+
+from pdf_parse import DataProcess
 
 
 class FaissRetriever(object):

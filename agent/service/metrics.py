@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 import threading
 import time
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 # 延迟直方图分桶（秒）：覆盖「毫秒级编排」到「秒级生成」的全区间
 LATENCY_BUCKETS: Tuple[float, ...] = (
@@ -54,7 +54,8 @@ class Metrics:
         self.ttft = _Histogram(TTFT_BUCKETS)
 
     # ── 写入 ──
-    def inc(self, name: str, labels: Dict[str, str] = None, value: float = 1.0) -> None:
+    def inc(self, name: str, labels: Optional[Dict[str, str]] = None,
+            value: float = 1.0) -> None:
         key = (name, tuple(sorted((labels or {}).items())))
         with self._lock:
             self.counters[key] = self.counters.get(key, 0.0) + value
@@ -122,7 +123,10 @@ def _merge_instance(label_str: str, instance: str) -> str:
 def _render_hist(name: str, help_text: str, hist: _Histogram, instance: str) -> List[str]:
     out = [f"# HELP {name} {help_text}", f"# TYPE {name} histogram"]
     cumulative = 0
-    for edge, count in zip(hist.buckets, hist.counts):
+    # 注意：counts 比 buckets **多一个**元素——最后那个是 +Inf 桶，单独在下面输出。
+    # 所以这里刻意切成等长再用 strict=True：既表达"桶边界与计数必须一一对应"，
+    # 又不会因为"长度天然不同"而报错（第一版直接 strict=True 就把 /metrics 打成 500 了）。
+    for edge, count in zip(hist.buckets, hist.counts[:len(hist.buckets)], strict=True):
         cumulative += count
         out.append(f'{name}_bucket{{le="{edge}",instance="{instance}"}} {cumulative}')
     cumulative += hist.counts[-1]

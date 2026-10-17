@@ -241,8 +241,15 @@ class Reflector:
     def verify(self, answer: str, evidence: Sequence[Dict], question: str = "",
                citations: Optional[Sequence[str]] = None) -> ReflectionResult:
         if not answer or answer.strip() == NO_ANSWER:
-            return ReflectionResult("ungrounded", 0.0, [], [], "refuse",
-                                    {"reason": "answer_is_no_answer"})
+            # 必须用关键字传参：原来这里按位置写成
+            #   ReflectionResult("ungrounded", 0.0, [], [], "refuse", {...})
+            # 于是 "refuse" 落进了 unverifiable_citations（list 字段），
+            # {"reason": ...} 落进了 next_action（str 字段）——**next_action 不再是 "refuse"**，
+            # 任何依赖它决定是否重试/拒答的逻辑都会静默走错分支。
+            # 这个 bug 是 mypy 抓出来的（arg-type），不是任何功能测试：NO_ANSWER 这条路径没人覆盖。
+            return ReflectionResult(verdict="ungrounded", grounded_ratio=0.0,
+                                    next_action="refuse",
+                                    detail={"reason": "answer_is_no_answer"})
 
         evidence_texts = [e.get("text", "") for e in evidence if e.get("text")]
         joined = "\n".join(evidence_texts)

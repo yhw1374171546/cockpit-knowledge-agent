@@ -26,7 +26,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from agent.reflection import Reflector, char_coverage, semantic_support            # noqa: E402
+from agent.reflection import Reflector, char_coverage, semantic_support  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -149,7 +149,7 @@ def main() -> int:
 
     print("\n逐句对比（只列出两种口径判定不同的样本）：")
     shown = 0
-    for a, b in zip(char_res["rows"], sem_res["rows"]):
+    for a, b in zip(char_res["rows"], sem_res["rows"], strict=False):
         if a["predicted"] != b["predicted"]:
             shown += 1
             print(f"  [{a['label']:<11}] {a['sentence'][:34]:<36} "
@@ -208,7 +208,7 @@ def _write_outputs(args, char_res, sem_res) -> None:
                      f"{res['recall_unsupported']:.1%} | {res['false_negative_pass']} | "
                      f"{res['accuracy']:.1%} |")
     lines += ["", "## 判定变化的样本", ""]
-    changed = [(a, b) for a, b in zip(char_res["rows"], sem_res["rows"])
+    changed = [(a, b) for a, b in zip(char_res["rows"], sem_res["rows"], strict=False)
                if a["predicted"] != b["predicted"]]
     if changed:
         lines += ["| 标签 | 句子 | 字符分 | 语义分 | 变化 |", "| --- | --- | --- | --- | --- |"]

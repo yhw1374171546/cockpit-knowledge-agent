@@ -1,11 +1,11 @@
-import aiohttp
 import asyncio
 import json
 import logging
 import time
 from typing import List, Tuple
-import numpy as np
 
+import aiohttp
+import numpy as np
 
 logger = logging.getLogger(__name__)
 REQUEST_LATENCY: List[Tuple[int, int, float]] = []
@@ -65,16 +65,17 @@ class BenchMarkRunner:
                                       "top_k": 1
                                       })
 
-                response = await send_request(session, payload, len(prompt))
+                # 只关心副作用（send_request 内部记录延迟/请求数），返回值不需要
+                await send_request(session, payload, len(prompt))
                 self.request_left -= 1
                 print(f"Response {len(self.requests) - self.request_left}")
 
 
 def main():
-    concurrency = 50 
+    concurrency = 50
     logger.info("Preparing for benchmark.")
     testset = json.load(open("bench_data.json"))
-    input_requests = list(testset.values()) 
+    input_requests = list(testset.values())
 
     logger.info("Benchmark starts.")
     benchmark_start_time = time.time()

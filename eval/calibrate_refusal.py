@@ -23,7 +23,7 @@ def load():
     gold = json.load(open(GOLD, encoding="utf-8"))
     pred = json.load(open(PRED, encoding="utf-8"))
     rows = []
-    for g, p in zip(gold, pred):
+    for g, p in zip(gold, pred, strict=False):
         raw = (p.get("answer_5") or "").strip()
         try:
             distance = float(raw)
@@ -71,7 +71,7 @@ def main():
 
     pos_d = [r["distance"] for r in pos if r["distance"] is not None]
     neg_d = [r["distance"] for r in neg if r["distance"] is not None]
-    print(f"\n[3] Top-1 距离分布")
+    print("\n[3] Top-1 距离分布")
     if pos_d:
         print(f"    应拒答: {sorted(round(x,1) for x in pos_d)}")
     if neg_d:
@@ -97,7 +97,7 @@ def main():
         f1 = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0
         sweep.append({"threshold": t, "tp": tp, "fp": fp, "fn": fn,
                       "precision": precision, "recall": recall, "f1": f1})
-    print(f"\n[5] 阈值扫描（把距离信号真正接入答案侧）")
+    print("\n[5] 阈值扫描（把距离信号真正接入答案侧）")
     print("    threshold   TPR(拒答率)  FPR(误杀率)  precision  recall   f1")
     for s in sweep:
         print(f"    {s['threshold']:>9}   {s['tp']}/{len(pos):<9} {s['fp']}/{len(neg):<9} "
@@ -122,7 +122,7 @@ def main():
     def simulate(gate_threshold, apply_gate=True):
         """apply_gate=False 表示「现状」：距离信号只记录在 answer_5，从未拦截答案。"""
         scores, refusal_hit = [], 0
-        for g, p, r in zip(gold, pred, rows):
+        for g, p, r in zip(gold, pred, rows, strict=False):
             gold_ans = (g.get("answer") or "").strip()
             if not apply_gate:
                 gated = False
@@ -142,7 +142,7 @@ def main():
         return sum(scores) / len(scores), refusal_hit
 
     before, before_refusal = simulate(500, apply_gate=False)
-    print(f"\n[7] 端到端净收益模拟（指标口径：关键词覆盖 0/1，与 4 路对比表一致）")
+    print("\n[7] 端到端净收益模拟（指标口径：关键词覆盖 0/1，与 4 路对比表一致）")
     print(f"    现状（信号只写在 answer_5，未拦截答案）：得分 {before:.4f}，拒答正确 {before_refusal}/{len(pos)}")
     sim_rows = []
     for t in [300, 400, 450, 480, 500, 550]:

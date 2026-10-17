@@ -18,9 +18,9 @@ from __future__ import annotations
 
 import random
 import time
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, Optional, Sequence
 
-from agent.llm import LLMBackend, LLMResponse, RuleBasedPlannerLLM, StreamChunk
+from agent.llm import LLMBackend, LLMResponse, RuleBasedPlannerLLM
 
 
 class InjectedFault(RuntimeError):

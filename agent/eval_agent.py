@@ -29,15 +29,13 @@ from typing import Dict, List
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from eval.llm_backend import (add_llm_args, backend_fields, cost_line,  # noqa: E402
-                              llm_id, llm_label, make_llm)
-
-from agent.graph import AgentConfig, AgentGraph              # noqa: E402
-from agent.kb import KnowledgeBase                           # noqa: E402
-from agent.llm import redact                                 # noqa: E402
-from agent.memory import ConversationMemory, VehicleProfile   # noqa: E402
-from agent.reflection import NO_ANSWER, Reflector            # noqa: E402
-from agent.tools import ToolRegistry                         # noqa: E402
+from agent.graph import AgentConfig, AgentGraph  # noqa: E402
+from agent.kb import KnowledgeBase  # noqa: E402
+from agent.llm import redact  # noqa: E402
+from agent.memory import ConversationMemory, VehicleProfile  # noqa: E402
+from agent.reflection import NO_ANSWER, Reflector  # noqa: E402
+from agent.tools import ToolRegistry  # noqa: E402
+from eval.llm_backend import add_llm_args, backend_fields, cost_line, llm_id, llm_label, make_llm  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GOLD = os.path.join(ROOT, "data", "gold.json")
@@ -232,7 +230,7 @@ def main():
     lines = ["# Agent 侧评测报告（自动生成）\n",
              f"- 知识库：{s['n']} 题测试 ｜ 块数 {kb.stats()['n_chunks']} ｜ "
              f"分词后端 {kb.stats()['tokenizer']} ｜ 向量路 {'开启' if kb.stats()['has_vector'] else '未开启'}",
-             f"- 编排：原生状态机（Router→Planner→Tool→Reflect→Answer），max_steps=6",
+             "- 编排：原生状态机（Router→Planner→Tool→Reflect→Answer），max_steps=6",
              f"- 模型后端：`{llm_id(args)}` —— {llm_label(args)}",
              cost_line(s) + "\n",
              "## 1. 总体指标\n",

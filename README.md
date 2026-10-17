@@ -97,7 +97,7 @@ flowchart TB
 | Agent 编排 | 原生状态机 + **LangGraph** StateGraph 适配器 | 零依赖可运行，同时保留 LangGraph 生态接入能力 |
 | 工具协议 | **OpenAI Function Calling**（`tools` schema） | 直接对接 vLLM 的 `/chat/completions`，无需适配层 |
 | 评测 | 自实现语义相似度（macbert + mean pooling）+ 关键词覆盖 | 口径与 text2vec `SentenceModel` 一致，去掉重依赖 |
-| 交付 | Docker + `build.sh` / `run.sh` | 一键镜像化，屏蔽环境差异 |
+| 交付 | Docker + `legacy/build.sh` / `legacy/run.sh` | 一键镜像化，屏蔽环境差异 |
 
 ---
 
@@ -108,7 +108,7 @@ flowchart TB
 
 ### 4.1 四路消融：增益到底来自哪一段
 
-`run.py` 对每题同时生成 4 个答案，形成天然消融（103 题，语义模型 max_len=128）：
+`legacy/run.py` 对每题同时生成 4 个答案，形成天然消融（103 题，语义模型 max_len=128）：
 
 | 策略 | 综合得分 | 关键词覆盖(0/1) | 关键词覆盖率 | 语义相似度 | 平均答案长度 |
 | --- | --- | --- | --- | --- | --- |
@@ -235,7 +235,7 @@ python agent/tests/test_service.py     # → Ran 29 tests, OK（服务层接口�
 
 | 路径 | 脚本 | 块数 | 页码覆盖 | 标题覆盖 | 适用 |
 | --- | --- | --- | --- | --- | --- |
-| 原始链路（课程实现） | `pdf_parse.py` | 8,785 | 0% | 0% | 复现基线四路消融 |
+| 原始链路（课程实现） | `legacy/pdf_parse.py` | 8,785 | 0% | 0% | 复现基线四路消融 |
 | 从头重建（三策略） | `kb/build_kb.py` | **9,301** | **100%** | 14.6% | **Agent 默认知识库** |
 | 页码对齐（保留原分块） | `kb/attach_pages.py` | 8,785 | 40.0% | 0% | 对照实验 |
 
@@ -252,9 +252,12 @@ python agent/tests/test_service.py     # → Ran 29 tests, OK（服务层接口�
 ```text
 综合项目实战项目一/
 ├── README.md
-├── run.py / pdf_parse.py / faiss_retriever.py / bm25_retriever.py   # 原始 RAG 链路
-├── rerank_model.py / vllm_model.py / qwen_generation_utils.py
-├── test_score.py / config.py / requirements.txt
+├── legacy/                            # 课程原始 RAG 链路（对照基线，不参与主线）
+│   ├── run.py / pdf_parse.py / faiss_retriever.py / bm25_retriever.py
+│   ├── rerank_model.py / vllm_model.py / qwen_generation_utils.py
+│   └── test_score.py / config.py / build.sh / run.sh
+├── pyproject.toml                     # 打包 + ruff/mypy 配置
+├── requirements.txt
 ├── agent/                        # ★ Agent 层
 │   ├── kb.py                     #   知识库与检索（自实现 BM25 + RRF + 可选向量）
 │   ├── tools.py                  #   工具注册表（schema/确认/去重/结构化错误/白名单 subset）
@@ -305,7 +308,7 @@ python agent/tests/test_service.py     # → Ran 29 tests, OK（服务层接口�
 ├── benchmark/                    # 异步压测 + vLLM 服务脚本
 ├── data/                         # 手册 / 测试集 / 标准答案 / 跑批结果（不入库）
 ├── pre_train_model/              # Qwen-7B-Chat / m3e-large / bge-reranker-large（不入库）
-└── Dockerfile / build.sh / run.sh
+└── Dockerfile.service / Dockerfile.vllm / docker-compose.yml
 ```
 
 ---
@@ -410,9 +413,9 @@ AGENT_KB_PATH=eval/fixtures/mini_corpus.jsonl python agent/tests/test_offline.py
 ### 8.7 原始链路与容器化
 
 ```bash
-python pdf_parse.py        # 仅构建知识库（无 GPU 可跑）
-python run.py              # 端到端 4 路跑批 → data/result.json
-bash build.sh && docker run --gpus all <镜像名>
+python legacy/pdf_parse.py        # 仅构建知识库（无 GPU 可跑）
+python legacy/run.py              # 端到端 4 路跑批 → data/result.json
+bash legacy/build.sh && docker run --gpus all <镜像名>
 python benchmark/benchmark.py   # 并发 50 压测（需先起 vLLM 服务）
 ```
 
@@ -422,19 +425,19 @@ python benchmark/benchmark.py   # 并发 50 压测（需先起 vLLM 服务）
 
 | # | 问题 | 状态 |
 | --- | --- | --- |
-| 1 | `test_score.py` 默认读不存在的 `gold2.json`，评测跑不通 | ✅ 已修（`eval/evaluate.py` 参数化 + 已产出真实得分） |
+| 1 | `legacy/test_score.py` 默认读不存在的 `gold2.json`，评测跑不通 | ✅ 已修（`eval/evaluate.py` 参数化 + 已产出真实得分） |
 | 2 | 拒答信号写入 `answer_5`，从未拦截答案 | ✅ 已修（Agent 层证据门控 + 引用校验，拒答 0/2 → 2/2） |
 | 3 | reranker `max_length=512` 截断平均 646 字的块 | ✅ 已量化（上下文缩 15.7%、覆盖率 +7.45 pt 的前提下仍有长块损失）；修法见待办 |
 | 4 | 知识块缺失页码/章节元数据，无法溯源 | ✅ 已修（重建后页码覆盖 100%，答案带 `第N页` 出处） |
 | 5 | `answer_5/6/7` 字段语义重叠、互相覆盖 | ✅ 已在 Agent 层拆分（`evidence`/`citations`/`gate_coverage`/`reflection` 分离） |
-| 6 | `pdf_parse.py` 用 list `in` 去重（O(n²)） | ✅ 已修（新构建脚本用 set + hash，拦下 1,619 个重复块） |
+| 6 | `legacy/pdf_parse.py` 用 list `in` 去重（O(n²)） | ✅ 已修（新构建脚本用 set + hash，拦下 1,619 个重复块） |
 | 7 | BM25 索引 id 回映射存在潜伏错位（`<5` 字过滤后仍用原下标） | ✅ 已在自实现 BM25 中消除（索引即分块列表） |
 | 8 | 耗时代码 `int(end-start)/60` 恒为 0 | ✅ 已在 Agent 层按阶段埋点（LLM/工具/反思分段耗时） |
 | 9 | `get_qa_chain` / `question()` 为死代码 | ⬜ 待清理（不影响运行） |
-| 10 | `bm25_retriever.py` 就地修改 `retriever.k` 存在竞态 | ✅ 已在自实现 BM25 中消除（无共享可变状态） |
+| 10 | `legacy/bm25_retriever.py` 就地修改 `retriever.k` 存在竞态 | ✅ 已在自实现 BM25 中消除（无共享可变状态） |
 | 11 | Prompt 写"吉利用户手册"但语料是领克手册 | ⬜ 待修（品牌元信息配置化） |
 | 12 | `requirements.txt` 含不可安装项、版本漂移 | ⬜ 待修（建议 `pip freeze` 锁定） |
-| 13 | 设备硬编码 `"cuda"`，未走 `config.py` | ✅ 已在 Agent 层支持 CPU/GPU 自动选择 |
+| 13 | 设备硬编码 `"cuda"`，未走 `legacy/config.py` | ✅ 已在 Agent 层支持 CPU/GPU 自动选择 |
 | 14 | 每题固定 4 次长上下文推理，线上成本 ×4 | ✅ 已说明：Agent 层线上单路；4 路仅离线消融 |
 
 **待办（下一步）**
@@ -992,7 +995,7 @@ python agent/tests/test_service.py      # 29 项进程内接口测试（CI 用�
 ## 二十、致谢与说明
 
 - 语料版权归领克汽车销售有限公司所有，本项目仅用于**技术学习与研究**，仓库不含语料。
-- `qwen_generation_utils.py` 来自 Qwen 官方开源仓库；`pre_train_model/` 下模型权重来自 ModelScope / HuggingFace 开源发布。
+- `legacy/qwen_generation_utils.py` 来自 Qwen 官方开源仓库；`pre_train_model/` 下模型权重来自 ModelScope / HuggingFace 开源发布。
 - 项目基于"智能座舱汽车知识大脑"实战课题完成：数据构建、检索链路、消融实验、缺陷排查、
   **多 Agent 编排 / 安全护栏 / 可观测与评测门禁**均为本人在原框架基础上的增量工作。
 - 课程原始说明文档备份于 [`docs/README_课程原版备份.md`](docs/README_课程原版备份.md)；深度分析见 [`docs/项目分析报告.md`](docs/项目分析报告.md)（均在本地，不入库）。

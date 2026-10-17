@@ -57,3 +57,23 @@ model_cache/
 Thumbs.db
 .vscode/
 .idea/
+
+# ── 本地运行时产物（压测/冒烟/服务的 SQLite 文件，绝不该入库）──
+_loadtest.db
+_loadtest.db-*
+_smoke*.db
+_smoke*.db-*
+agent_service.db
+agent_service.db-*
+kv_shared.db
+*.db-shm
+*.db-wal
+
+# ── 打包/构建产物 ──
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+__pycache__/

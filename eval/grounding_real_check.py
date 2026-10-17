@@ -26,12 +26,12 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from agent.graph import AgentConfig, AgentGraph                                   # noqa: E402
-from agent.kb import KnowledgeBase                                                # noqa: E402
-from agent.llm import build_llm, load_dotenv, redact                              # noqa: E402
-from agent.memory import ConversationMemory, VehicleProfile                       # noqa: E402
-from agent.reflection import Reflector                                            # noqa: E402
-from agent.tools import build_default_registry                                    # noqa: E402
+from agent.graph import AgentConfig, AgentGraph  # noqa: E402
+from agent.kb import KnowledgeBase  # noqa: E402
+from agent.llm import build_llm, load_dotenv, redact  # noqa: E402
+from agent.memory import ConversationMemory, VehicleProfile  # noqa: E402
+from agent.reflection import Reflector  # noqa: E402
+from agent.tools import build_default_registry  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DETAILS = os.path.join(ROOT, "eval", "agent_details_deepseek.jsonl")
@@ -165,7 +165,7 @@ def _write_outputs(args, results, neg_results, cost, before, after) -> None:
         "- 判定口径：重跑同一问题，`status == refused` 或答案为「无答案」即仍被误杀",
         "",
         "## 结果", "",
-        f"| 指标 | 修复前 | 修复后 |",
+        "| 指标 | 修复前 | 修复后 |",
         "| --- | --- | --- |",
         f"| 误杀题数 | **{before}/{before}** | **{after}/{before}** |",
         f"| 域外问题仍正确拒答 | — | "

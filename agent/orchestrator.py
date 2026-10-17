@@ -11,7 +11,6 @@
 
 from __future__ import annotations
 
-import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Sequence
@@ -21,15 +20,25 @@ from agent.agents.manual_expert import ManualExpert
 from agent.agents.safety_critic import SafetyCritic
 from agent.agents.service_advisor import ServiceAdvisor
 from agent.agents.vehicle_control import VehicleControlAgent
+from agent.graph import AgentConfig, AgentGraph
 from agent.guardrails.budget import Budget
 from agent.guardrails.policy import PolicyEngine
-from agent.graph import AgentConfig, AgentGraph
 from agent.llm import LLMBackend, RuleBasedPlannerLLM
 from agent.memory import ConversationMemory, VehicleProfile
 from agent.obs.tracer import Tracer
-from agent.protocols import (AGENT_PRIORITY, PERMISSIVE_PATTERNS, RISK_CRITICAL,
-                            AgentResult, ConflictReport, Handoff, Plan, SubTask,
-                            SupervisorState, extract_numbers, risk_at_least)
+from agent.protocols import (
+    AGENT_PRIORITY,
+    PERMISSIVE_PATTERNS,
+    RISK_CRITICAL,
+    AgentResult,
+    ConflictReport,
+    Handoff,
+    Plan,
+    SubTask,
+    SupervisorState,
+    extract_numbers,
+    risk_at_least,
+)
 from agent.reflection import NO_ANSWER, Reflector
 from agent.tools import ToolRegistry
 
@@ -203,9 +212,14 @@ class Supervisor:
                   state: SupervisorState) -> List[AgentResult]:
         results: List[AgentResult] = []
         handoffs: List[Handoff] = []
+        budgets: Dict[str, Budget] = {}
         for task in plan.subtasks:
-            child = self.budget.slice(task.agent, step_ratio=0.7, tool_ratio=0.7,
-                                     token_ratio=0.7, cost_ratio=0.7)
+            # 子预算必须**真的传下去**。
+            # 原来这里 `child = self.budget.slice(...)` 算完就丢，
+            # 子 Agent 内部又各自 `Budget(label=...)` 新建全量预算 ——
+            # 也就是说"预算传播"只是写在代码里，从未真正生效（lint 的 F841 抓出来的）。
+            budgets[task.id] = self.budget.slice(task.agent, step_ratio=0.7, tool_ratio=0.7,
+                                                 token_ratio=0.7, cost_ratio=0.7)
             handoffs.append(Handoff(from_agent="supervisor", to_agent=task.agent, task=task,
                                     context_digest=mem.system_context(),
                                     injected_constraints=["工具白名单受限",
@@ -217,7 +231,8 @@ class Supervisor:
             if agent is None:
                 return AgentResult(agent=handoff.to_agent, subtask_id=handoff.task.id,
                                    status="blocked", answer=NO_ANSWER)
-            return agent.run(handoff, memory=ConversationMemory(profile=mem.profile))
+            return agent.run(handoff, memory=ConversationMemory(profile=mem.profile),
+                             budget=budgets.get(handoff.task.id))
 
         if self.parallel and len(handoffs) > 1:
             with ThreadPoolExecutor(max_workers=min(3, len(handoffs))) as pool:

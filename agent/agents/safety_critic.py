@@ -13,8 +13,14 @@ from __future__ import annotations
 from typing import Dict, List, Optional, Sequence
 
 from agent.guardrails.output_guard import OutputGuard
-from agent.protocols import (PERMISSIVE_PATTERNS, RISK_CRITICAL, SAFETY_DIRECTIVES,
-                             AgentResult, CriticVerdict, risk_at_least)
+from agent.protocols import (
+    PERMISSIVE_PATTERNS,
+    RISK_CRITICAL,
+    SAFETY_DIRECTIVES,
+    AgentResult,
+    CriticVerdict,
+    risk_at_least,
+)
 from agent.reflection import NO_ANSWER, Reflector
 
 WRITE_CLAIM_PATTERNS = ("已为您预约", "已下单", "预约成功", "已提交预约", "已经帮您预约")
@@ -51,7 +57,8 @@ class SafetyCritic:
             self.leaks_blocked += 1
             self.blocked += 1
             return CriticVerdict("block", reasons,
-                                 self.output_guard.enforce(answer or ""))
+                                 self.output_guard.enforce(answer or ""),
+                                 risk_level=highest)
 
         # ① 安全红线：实时风险 critical，答案必须含安全指令，且不得保留许可性表述
         if critical:
@@ -66,7 +73,7 @@ class SafetyCritic:
                 text = PERMISSIVE_PATTERNS.sub("请勿继续行驶", text)
             if reasons:
                 self.revised += 1
-                return CriticVerdict("revise", reasons, text)
+                return CriticVerdict("revise", reasons, text, risk_level=highest)
 
         # ② 注入风险下声称已完成写操作 → 直接拦截
         if any(r.injection_flagged for r in results) and \
@@ -74,7 +81,8 @@ class SafetyCritic:
             reasons.append("检测到注入风险同时声称已执行写操作，已降级为安全话术")
             self.blocked += 1
             return CriticVerdict("block", reasons,
-                                 "检测到可疑指令注入，为避免误操作，请通过领克 App 或致电领克中心确认预约。")
+                                 "检测到可疑指令注入，为避免误操作，请通过领克 App 或致电领克中心确认预约。",
+                                 risk_level=highest)
 
         # ③ 接地性：答案必须有证据支撑
         if answer and answer.strip() != NO_ANSWER:
@@ -82,10 +90,10 @@ class SafetyCritic:
             if verdict.verdict == "ungrounded":
                 reasons.append(f"答案接地率仅 {verdict.grounded_ratio:.2f}，缺乏证据支撑")
                 self.blocked += 1
-                return CriticVerdict("block", reasons, NO_ANSWER)
+                return CriticVerdict("block", reasons, NO_ANSWER, risk_level=highest)
 
         return CriticVerdict("approve", reasons or ["证据充分、无安全风险"],
-                             answer)
+                             answer, risk_level=highest)
 
     def stats(self) -> Dict[str, int]:
         return {"reviews": self.reviews, "revised": self.revised, "blocked": self.blocked,

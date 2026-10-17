@@ -150,7 +150,6 @@ class InjectionDetector:
     def _cooccurrence_hits(text: str, source: str = "") -> List[InjectionHit]:
         """越权词与动作词在同一窗口内共现 → 疑似话术劫持。"""
         hits: List[InjectionHit] = []
-        lowered = text.lower()
         for action in ACTION_TERMS:
             start = 0
             while True:

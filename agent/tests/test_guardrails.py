@@ -14,13 +14,21 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from agent.cache import SemanticCache                                # noqa: E402
-from agent.guardrails import (Budget, BudgetExceeded, BudgetTracker,  # noqa: E402
-                              CostModel, InjectionDetector, OutputGuard,
-                              PolicyContext, PolicyEngine, ToolPolicy,
-                              isolate_evidence)
-from agent.guardrails.policy import mask_sensitive                   # noqa: E402
-from agent.obs import Tracer                                         # noqa: E402
+from agent.cache import SemanticCache  # noqa: E402
+from agent.guardrails import (  # noqa: E402
+    Budget,
+    BudgetExceeded,
+    BudgetTracker,
+    CostModel,
+    InjectionDetector,
+    OutputGuard,
+    PolicyContext,
+    PolicyEngine,
+    ToolPolicy,
+    isolate_evidence,
+)
+from agent.guardrails.policy import mask_sensitive  # noqa: E402
+from agent.obs import Tracer  # noqa: E402
 
 
 class TestInjectionDetector(unittest.TestCase):
@@ -172,7 +180,8 @@ class TestPolicyEngine(unittest.TestCase):
 class TestBudget(unittest.TestCase):
     def test_step_limit_trips(self):
         bt = BudgetTracker(Budget(max_steps=2))
-        bt.step(); bt.step()
+        bt.step()
+        bt.step()
         self.assertFalse(bt.exhausted)
         bt.step()
         self.assertTrue(bt.exhausted)
@@ -182,7 +191,9 @@ class TestBudget(unittest.TestCase):
 
     def test_tool_call_cap(self):
         bt = BudgetTracker(Budget(max_tool_calls=2))
-        bt.tool_call("search_manual"); bt.tool_call("search_manual"); bt.tool_call("search_manual")
+        bt.tool_call("search_manual")
+        bt.tool_call("search_manual")
+        bt.tool_call("search_manual")
         self.assertTrue(bt.exhausted)
         self.assertEqual(bt.tool_calls_by_name["search_manual"], 3)
 
@@ -194,8 +205,10 @@ class TestBudget(unittest.TestCase):
 
     def test_first_reason_kept_and_deduped(self):
         bt = BudgetTracker(Budget(max_steps=1, max_tokens=10))
-        bt.step(); bt.step()                            # 第 2 次 step 才越界
-        bt.charge_tokens(100, 0); bt.charge_tokens(100, 0)
+        bt.step()
+        bt.step()   # 第 2 次 step 才越界
+        bt.charge_tokens(100, 0)
+        bt.charge_tokens(100, 0)
         self.assertEqual(len(bt.stop_events), len(set(bt.stop_events)))
         self.assertIn("步数", bt.exhausted_reason)      # 首次触发原因被保留
 
@@ -204,7 +217,10 @@ class TestBudget(unittest.TestCase):
         child = parent.budget.slice("manual_expert", 0.5, 0.5, 0.5, 0.5)
         self.assertEqual(child.max_steps, 4)
         self.assertEqual(child.max_tokens, 4000)
-        sub = BudgetTracker(child); sub.step(); sub.tool_call("search_manual"); sub.charge_tokens(100, 50)
+        sub = BudgetTracker(child)
+        sub.step()
+        sub.tool_call("search_manual")
+        sub.charge_tokens(100, 50)
         before = parent.tokens_in
         parent.merge(sub)
         self.assertEqual(parent.steps, 1)

@@ -23,7 +23,7 @@ import os
 import re
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_KB = os.path.join(ROOT, "all_text.txt")
@@ -300,7 +300,9 @@ class KnowledgeBase:
         vec = encode([query])
         scores, ids = index.search(vec, top_k)
         out = []
-        for score, idx in zip(scores[0], ids[0]):
+        # strict=True：FAISS 返回的 scores/ids 是等长平行数组，
+        # 一旦不等长说明索引状态异常，宁可立刻报错也不要静默截断（错位会把答案张冠李戴）。
+        for score, idx in zip(scores[0], ids[0], strict=True):
             if idx < 0:
                 continue
             c = self.chunks[int(idx)]

@@ -40,13 +40,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from agent.graph import AgentConfig, AgentGraph                     # noqa: E402
-from agent.kb import FIXTURE_KB, KnowledgeBase                      # noqa: E402
-from agent.llm import RuleBasedPlannerLLM                           # noqa: E402
-from agent.memory import ConversationMemory, VehicleProfile         # noqa: E402
-from agent.reflection import (BARE_PAGE_RE, CITATION_RE,  # noqa: E402
-                              NO_ANSWER, Reflector)
-from agent.tools import ToolRegistry                                # noqa: E402
+from agent.graph import AgentConfig, AgentGraph  # noqa: E402
+from agent.kb import FIXTURE_KB, KnowledgeBase  # noqa: E402
+from agent.llm import RuleBasedPlannerLLM  # noqa: E402
+from agent.memory import ConversationMemory, VehicleProfile  # noqa: E402
+from agent.reflection import BARE_PAGE_RE, CITATION_RE, NO_ANSWER, Reflector  # noqa: E402
+from agent.tools import ToolRegistry  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT_JSON = os.path.join(ROOT, "eval", "citation_metrics.json")
@@ -263,12 +262,12 @@ def label_case(case: Dict, reflector: Reflector, kb: KnowledgeBase) -> Dict[str,
     # 确实被抓住了，单独计数以免低估检出能力。
     extra_detected = [c for c in invalid_set if not match_cite(c, units)]
 
-    tp = sum(1 for e, g in zip(expected, got) if e == "invalid" and g == "invalid")
-    fn = sum(1 for e, g in zip(expected, got) if e == "invalid" and g != "invalid")
-    fp = sum(1 for e, g in zip(expected, got) if e == "valid" and g == "invalid")
-    tn = sum(1 for e, g in zip(expected, got) if e == "valid" and g != "invalid")
-    unverif = sum(1 for e, g in zip(expected, got) if e == "unverifiable" and g == "unverifiable")
-    unverif_mis = [u for e, g, u in zip(expected, got, units)
+    tp = sum(1 for e, g in zip(expected, got, strict=False) if e == "invalid" and g == "invalid")
+    fn = sum(1 for e, g in zip(expected, got, strict=False) if e == "invalid" and g != "invalid")
+    fp = sum(1 for e, g in zip(expected, got, strict=False) if e == "valid" and g == "invalid")
+    tn = sum(1 for e, g in zip(expected, got, strict=False) if e == "valid" and g != "invalid")
+    unverif = sum(1 for e, g in zip(expected, got, strict=False) if e == "unverifiable" and g == "unverifiable")
+    unverif_mis = [u for e, g, u in zip(expected, got, units, strict=False)
                    if e == "unverifiable" and g != "unverifiable"]
     # 引用缺失：答案非空、非拒答，但一个引用（方括号或裸页码）都没有
     answered = (answer or "").strip() not in ("", NO_ANSWER)
@@ -442,7 +441,7 @@ def render_md(s: Dict, label_rows: List[Dict], live_rows: List[Dict], kb_path: s
         f"- 真实链路集合：{live['n_questions']} 个可答题跑完整 Agent 后核对 citations 与 evidence",
         f"- 知识库：`{kb_path}` ｜ 块数 {s['kb_stats']['n_chunks']} ｜ "
         f"有页码元数据的块 {s['kb_stats']['with_page_meta']}",
-        f"- 后端：`planner`（离线规则替身），确定性、零成本\n",
+        "- 后端：`planner`（离线规则替身），确定性、零成本\n",
         "## 1. 标注集合：引用校验准召\n",
         "> 正类 = 「非法引用（编造出处）」。TP = 非法被正确判非法；"
         "FP = 合法被误判非法（**会误杀正确回答**）；FN = 非法被漏判。\n",

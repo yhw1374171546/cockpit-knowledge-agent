@@ -35,8 +35,7 @@ from typing import Any, Dict, Optional, Sequence
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from agent.llm import (PROVIDER_PRESETS, RuleBasedPlannerLLM,  # noqa: E402
-                       build_llm, load_dotenv, redact)
+from agent.llm import PROVIDER_PRESETS, RuleBasedPlannerLLM, build_llm, load_dotenv, redact  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 

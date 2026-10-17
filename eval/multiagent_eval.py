@@ -31,17 +31,15 @@ from typing import Any, Dict, List, Sequence
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from eval.llm_backend import (add_llm_args, backend_fields, cost_line,  # noqa: E402
-                              llm_id, llm_label, make_llm)
-from eval.multiagent_set import TELEMETRY_PROFILES, load_cases    # noqa: E402
-
-from agent.kb import KnowledgeBase                                # noqa: E402
-from agent.llm import redact                                      # noqa: E402
-from agent.memory import ConversationMemory, VehicleProfile       # noqa: E402
-from agent.obs import Tracer                                      # noqa: E402
-from agent.orchestrator import Supervisor                         # noqa: E402
-from agent.protocols import SAFETY_DIRECTIVES, risk_at_least      # noqa: E402
-from agent.tools import ToolRegistry                              # noqa: E402
+from agent.kb import KnowledgeBase  # noqa: E402
+from agent.llm import redact  # noqa: E402
+from agent.memory import ConversationMemory, VehicleProfile  # noqa: E402
+from agent.obs import Tracer  # noqa: E402
+from agent.orchestrator import Supervisor  # noqa: E402
+from agent.protocols import SAFETY_DIRECTIVES, risk_at_least  # noqa: E402
+from agent.tools import ToolRegistry  # noqa: E402
+from eval.llm_backend import add_llm_args, backend_fields, cost_line, llm_id, llm_label, make_llm  # noqa: E402
+from eval.multiagent_set import TELEMETRY_PROFILES, load_cases  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT_JSON = os.path.join(ROOT, "eval", "multiagent_metrics.json")
@@ -130,17 +128,17 @@ def main():
     safety_cases = [c for c in cases if c["kind"] in ("safety", "conflict")]
     conflict_cases = [c for c in cases if c["expect_conflict"]]
     multi_cases = [c for c in cases if c["kind"] == "multi"]
-    m_safety = [r for r, c in zip(multi, cases) if c["kind"] in ("safety", "conflict")]
-    s_safety = [r for r, c in zip(single, cases) if c["kind"] in ("safety", "conflict")]
-    m_conf = [r for r, c in zip(multi, cases) if c["expect_conflict"]]
-    m_multi = [r for r, c in zip(multi, cases) if c["kind"] == "multi"]
+    m_safety = [r for r, c in zip(multi, cases, strict=False) if c["kind"] in ("safety", "conflict")]
+    s_safety = [r for r, c in zip(single, cases, strict=False) if c["kind"] in ("safety", "conflict")]
+    m_conf = [r for r, c in zip(multi, cases, strict=False) if c["expect_conflict"]]
+    m_multi = [r for r, c in zip(multi, cases, strict=False) if c["kind"] == "multi"]
     m_all = multi
     s_all = single
 
     summary = {
         "n_cases": len(cases),
         "multi": {
-            "routing_accuracy": pct([r for r, c in zip(multi, cases) if c["kind"] in ("multi", "conflict")],
+            "routing_accuracy": pct([r for r, c in zip(multi, cases, strict=False) if c["kind"] in ("multi", "conflict")],
                                     lambda r: r["routing_ok"]),
             "answer_rate": pct(m_all, lambda r: r["answered"]),
             "safety_directive_rate": pct(m_safety, lambda r: r["directive"]),
@@ -203,7 +201,7 @@ def main():
         "| ID | 类型 | 期望专家 | 实际专家 | 路由 | 冲突 | 评审 | 安全指令 |",
         "| --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
-    for r, c in zip(multi, cases):
+    for r, c in zip(multi, cases, strict=False):
         md.append(f"| {r['id']} | {r['kind']} | {','.join(c['expect_agents'])} | "
                   f"{','.join(r['agents'])} | {'✅' if r['routing_ok'] else '❌'} | "
                   f"{'✅' if r['conflict_detected'] else '—'} | {r['verdict']} | "

@@ -5,13 +5,12 @@
 
 """阿里千问模型的工具函数，来源于官网"""
 
-from typing import Tuple, List, Union, Iterable
+from typing import Iterable, List, Tuple, Union
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from transformers import PreTrainedTokenizer
-from transformers import logging
+from transformers import PreTrainedTokenizer, logging
 from transformers.generation import LogitsProcessor
 
 logger = logging.get_logger(__name__)

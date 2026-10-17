@@ -18,8 +18,20 @@ from contextlib import contextmanager
 from datetime import date, datetime
 from typing import Iterator, Optional
 
-from sqlalchemy import (Boolean, Column, Date, DateTime, Float, ForeignKey, Index, Integer,
-                        String, Text, create_engine, func)
+from sqlalchemy import (
+    Boolean,
+    Column,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    create_engine,
+    func,
+)
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 Base = declarative_base()

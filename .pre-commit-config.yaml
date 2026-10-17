@@ -1,0 +1,36 @@
+# pre-commit：把"提交前该做的事"自动化，避免 lint 问题滚到 CI 才发现
+#
+# 一次性启用（本机需要先装 pre-commit）：
+#     pip install pre-commit && pre-commit install
+# 手动全量跑一遍：
+#     pre-commit run --all-files
+#
+# 说明：这里只挂**确定性、快、无害**的检查。
+# - ruff 只做 lint 与极少量安全修复（--fix），不启用 formatter 全量重排，
+#   以免与本项目大量中文字符串的手工对齐冲突；
+# - 不挂 mypy：它比 ruff 慢很多，放在 CI 单独一步跑（见 .github/workflows/agent-ci.yml）。
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.1
+    hooks:
+      - id: ruff
+        name: ruff（lint + 安全自动修复）
+        args: [--fix, --exit-non-zero-on-fix]
+        # 课程原始基线不动它
+        exclude: ^legacy/
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: ^legacy/
+      - id: end-of-file-fixer
+        exclude: ^legacy/
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+        # 语料与模型权重不进仓库（.gitignore 已排除，这里再兜一层）
+        exclude: ^(kb|data|pre_train_model|images)/

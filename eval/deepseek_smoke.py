@@ -26,8 +26,8 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from agent.llm import PROVIDER_PRESETS, build_llm, load_dotenv, redact   # noqa: E402
-from agent.tools import build_default_registry                          # noqa: E402
+from agent.llm import PROVIDER_PRESETS, build_llm, load_dotenv, redact  # noqa: E402
+from agent.tools import build_default_registry  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 QUESTIONS = [

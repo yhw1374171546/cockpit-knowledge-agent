@@ -1,10 +1,8 @@
 # coding=utf-8
 import json
-import sys
-import re
-import numpy as np
-from text2vec import SentenceModel, semantic_search, Similarity
 
+import numpy as np
+from text2vec import SentenceModel, semantic_search
 
 simModel_path = './pre_train_model/text2vec-base-chinese'  # 相似度模型路径
 simModel = SentenceModel(model_name_or_path=simModel_path, device='cuda:0')
@@ -40,7 +38,7 @@ def report_score(gold_path, predict_path):
             keyword_score = calc_jaccard(join_keywords, keywords)
             score = 0.5 * keyword_score + 0.5 * semantic_score
         gold_info[idx]["score"] = score
-        gold_info[idx]["predict"] = pred 
+        gold_info[idx]["predict"] = pred
         idx += 1
         print(f"预测: {question}, 得分: {score}")
 
@@ -53,11 +51,11 @@ if __name__ == "__main__":
     '''
 
     # 标准答案路径
-    gold_path = "./data/gold2.json" 
+    gold_path = "./data/gold2.json"
     print("Read gold from %s" % gold_path)
 
     # 预测文件路径
-    predict_path = "./data/result.json" 
+    predict_path = "./data/result.json"
     print("Read predict file from %s" % predict_path)
 
     results = report_score(gold_path, predict_path)
@@ -70,7 +68,7 @@ if __name__ == "__main__":
     print("="*100)
 
     # 结果文件路径
-    metric_path = "./data/metrics.json" 
+    metric_path = "./data/metrics.json"
     results_info = json.dumps(results, ensure_ascii=False, indent=2)
     with open(metric_path, "w") as fd:
         fd.write(results_info)

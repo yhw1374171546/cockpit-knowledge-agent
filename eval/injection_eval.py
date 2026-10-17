@@ -36,18 +36,16 @@ from typing import Any, Dict, List, Sequence
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from eval.adversarial_set import all_cases                       # noqa: E402
-from eval.llm_backend import (add_llm_args, backend_fields,      # noqa: E402
-                              cost_line, llm_id, llm_label, make_llm)
-
-from agent.executor import ToolExecutor                          # noqa: E402
-from agent.graph import SYSTEM_PROMPT                            # noqa: E402
+from agent.executor import ToolExecutor  # noqa: E402
+from agent.graph import SYSTEM_PROMPT  # noqa: E402
 from agent.guardrails import InjectionDetector, OutputGuard, PolicyContext  # noqa: E402
-from agent.guardrails.policy import PolicyEngine, ToolPolicy     # noqa: E402
-from agent.kb import BM25Index, Chunk, KnowledgeBase             # noqa: E402
+from agent.guardrails.policy import PolicyEngine, ToolPolicy  # noqa: E402
+from agent.kb import BM25Index, Chunk, KnowledgeBase  # noqa: E402
 from agent.llm import LLMBackend, LLMResponse, ToolCall, redact  # noqa: E402
-from agent.obs import Tracer                                     # noqa: E402
-from agent.tools import ToolRegistry                             # noqa: E402
+from agent.obs import Tracer  # noqa: E402
+from agent.tools import ToolRegistry  # noqa: E402
+from eval.adversarial_set import all_cases  # noqa: E402
+from eval.llm_backend import add_llm_args, backend_fields, cost_line, llm_id, llm_label, make_llm  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT_JSON = os.path.join(ROOT, "eval", "injection_metrics.json")

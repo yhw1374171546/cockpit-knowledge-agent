@@ -39,27 +39,47 @@ from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 
 from agent.cache import SemanticCache, cacheable_status
 from agent.graph import AgentConfig, AgentGraph, AgentState
-from agent.guardrails.policy import PolicyEngine, ToolPolicy
+from agent.guardrails.policy import PolicyEngine
 from agent.kb import KnowledgeBase
-from agent.llm import (LLMBackend, OpenAICompatibleLLM, RuleBasedPlannerLLM,
-                       StreamingRulePlanner)
+from agent.llm import LLMBackend, OpenAICompatibleLLM, RuleBasedPlannerLLM, StreamingRulePlanner
 from agent.memory import ConversationMemory, VehicleProfile
 from agent.obs.tracer import Tracer
 from agent.reflection import Reflector
-from agent.service.auth import (AuthError, Principal, decode_token, issue_token,
-                                resolve_tenant)
+from agent.service.auth import AuthError, Principal, decode_token, issue_token, resolve_tenant
 from agent.service.config import Settings
-from agent.service.db import (Database, Feedback, MessageRow, SessionRow, ToolCallRow,
-                              get_database, reset_database)
-from agent.service.kv import KVStore, build_kv
+from agent.service.db import (
+    Database,
+    Feedback,
+    MessageRow,
+    SessionRow,
+    ToolCallRow,
+    get_database,
+    reset_database,
+)
 from agent.service.faults import DegradingLLM, FaultyLLM
+from agent.service.kv import KVStore, build_kv
 from agent.service.metrics import METRICS
-from agent.service.schemas import (ChatRequest, ChatResponse, ConfirmRequest,
-                                   ConfirmResponse, ErrorResponse, FeedbackRequest,
-                                   HealthResponse, SessionInfo, TokenRequest,
-                                   TokenResponse, ToolCallInfo, ToolInfo)
-from agent.service.security import (AuditService, ConfirmationStore, IdempotencyStore,
-                                    QuotaService, RateLimiter)
+from agent.service.schemas import (
+    ChatRequest,
+    ChatResponse,
+    ConfirmRequest,
+    ConfirmResponse,
+    ErrorResponse,
+    FeedbackRequest,
+    HealthResponse,
+    SessionInfo,
+    TokenRequest,
+    TokenResponse,
+    ToolCallInfo,
+    ToolInfo,
+)
+from agent.service.security import (
+    AuditService,
+    ConfirmationStore,
+    IdempotencyStore,
+    QuotaService,
+    RateLimiter,
+)
 from agent.tools import ToolRegistry, build_default_registry
 
 logger = logging.getLogger("agent.service")
@@ -491,7 +511,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         db = _db(request)
         with db.session() as session:
             from sqlalchemy import func
-            from agent.service.db import IdempotencyKey, Quota, ToolCallRow as TC
+
+            from agent.service.db import IdempotencyKey, Quota
+            from agent.service.db import ToolCallRow as TC
             n_messages = session.query(func.count(MessageRow.id)).scalar() or 0
             tokens = session.query(func.sum(MessageRow.tokens_in + MessageRow.tokens_out)).scalar() or 0
             cost = session.query(func.sum(MessageRow.cost_usd)).scalar() or 0.0

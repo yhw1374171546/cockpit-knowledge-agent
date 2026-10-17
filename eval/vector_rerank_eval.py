@@ -83,7 +83,7 @@ class VectorIndex:
     def search(self, query, top_k=15):
         vec = self.encode([query])
         scores, ids = self.index.search(vec, top_k)
-        return [(int(i), float(s)) for s, i in zip(scores[0], ids[0]) if i >= 0]
+        return [(int(i), float(s)) for s, i in zip(scores[0], ids[0], strict=False) if i >= 0]
 
 
 class Reranker:
@@ -106,7 +106,7 @@ class Reranker:
                                     return_tensors="pt").to(self.device)
             with self.torch.no_grad():
                 logits = self.model(**inputs).logits.view(-1).float().cpu().tolist()
-            order.extend(zip(batch, logits))
+            order.extend(zip(batch, logits, strict=False))
         order.sort(key=lambda x: x[1], reverse=True)
         return [d for d, _ in order]
 
@@ -191,7 +191,7 @@ def main():
         if i % 10 == 0:
             print(f"  {i}/{len(cases)} 已完成（{(time.perf_counter() - started):.0f}s）", flush=True)
 
-    pos = [r for r, c in zip(rows, cases) if not c["negative"]]
+    pos = [r for r, c in zip(rows, cases, strict=False) if not c["negative"]]
     summary = {
         "n": len(cases), "recall_k": args.recall_k, "top_k": args.top_k,
         "vector_index_seconds": round(index.encode_seconds, 1),

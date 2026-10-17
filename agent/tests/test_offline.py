@@ -17,12 +17,12 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from agent.graph import AgentConfig, AgentGraph, build_langgraph_app     # noqa: E402
-from agent.kb import KnowledgeBase, Tokenizer                            # noqa: E402
+from agent.graph import AgentConfig, AgentGraph, build_langgraph_app  # noqa: E402
+from agent.kb import KnowledgeBase, Tokenizer  # noqa: E402
 from agent.llm import LLMResponse, RuleBasedPlannerLLM, ScriptedLLM, ToolCall  # noqa: E402
-from agent.memory import ConversationMemory, VehicleProfile              # noqa: E402
-from agent.reflection import Reflector                                   # noqa: E402
-from agent.tools import ToolRegistry, build_default_registry             # noqa: E402
+from agent.memory import ConversationMemory  # noqa: E402
+from agent.reflection import Reflector  # noqa: E402
+from agent.tools import ToolRegistry  # noqa: E402
 
 KB = None
 
@@ -256,10 +256,10 @@ class TestAgentGraph(unittest.TestCase):
         class LoopingLLM(RuleBasedPlannerLLM):
             def chat(self, messages, tools=None, temperature=0.0, max_tokens=1024):
                 self.turn += 1
+                # 每次都换一个 query，避免被"重复调用去重"提前拦下，
+                # 这样才能真正压到"最大步数"这条治理上。
                 return LLMResponse(tool_calls=[ToolCall("search_manual",
-                                                        {"query": f"座椅{i}", "top_k": 2})]
-                                   if False else
-                                   [ToolCall("search_manual", {"query": f"座椅{self.turn}"})])
+                                                        {"query": f"座椅{self.turn}"})])
 
         config = AgentConfig(max_steps=4)
         st = fresh_agent(LoopingLLM(), config).run("座椅加热")
