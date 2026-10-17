@@ -83,6 +83,9 @@ class Settings:
     semantic_cache_ttl_s: float = 3600.0
     semantic_cache_shared: bool = True       # True=落 KV（多副本共享）；False=纯进程内
 
+    # 表结构：开发/测试自动建表；**生产应置 0 并先跑 alembic upgrade head**
+    auto_create_schema: bool = True
+
     # SSE 断线重连（BE7）：事件缓冲的容量上限（按流、按事件）与 TTL
     sse_buffer_streams: int = 256
     sse_buffer_events: int = 512
@@ -141,6 +144,8 @@ class Settings:
             semantic_cache_max_entries=_int("SERVICE_SEMANTIC_CACHE_MAX_ENTRIES", 512),
             semantic_cache_ttl_s=_float("SERVICE_SEMANTIC_CACHE_TTL_S", 3600.0),
             semantic_cache_shared=os.environ.get("SERVICE_SEMANTIC_CACHE_SHARED", "1").lower()
+            not in ("0", "false"),
+            auto_create_schema=os.environ.get("SERVICE_AUTO_CREATE_SCHEMA", "1").lower()
             not in ("0", "false"),
             sse_buffer_streams=_int("SERVICE_SSE_BUFFER_STREAMS", 256),
             sse_buffer_events=_int("SERVICE_SSE_BUFFER_EVENTS", 512),

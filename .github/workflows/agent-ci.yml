@@ -88,5 +88,12 @@ jobs:
       - name: Semantic cache wiring bench (HTTP 全链路，命中即省一次模型调用)
         run: python eval/cache_bench.py
 
+      - name: Database migrations (BE5：空库 upgrade head + 离线 SQL 校验)
+        run: |
+          pip install alembic
+          python -m alembic upgrade head --sql > /tmp/schema.sql
+          python -m alembic -x db_url=sqlite:////tmp/ci_mig.db upgrade head
+          python agent/tests/test_migrations.py
+
       - name: Metrics gate (skips missing, fails on regression)
         run: python eval/ci_gate.py

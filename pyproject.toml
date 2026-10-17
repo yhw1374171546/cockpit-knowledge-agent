@@ -50,8 +50,16 @@ namespaces = false
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-# 不检查这些目录：课程原始基线、本地文档、真实语料、模型权重
-extend-exclude = ["legacy", "docs", "kb", "pre_train_model", "data", "images"]
+# 不检查这些目录：课程原始基线、本地文档、真实语料、模型权重、alembic 生成产物
+extend-exclude = [
+    "legacy",
+    "docs",
+    "kb",
+    "pre_train_model",
+    "data",
+    "images",
+    "migrations/versions",   # alembic 模板产物，不套本项目的风格规则
+]
 
 [tool.ruff.lint]
 # 为什么不含 UP（pyupgrade）：本项目刻意保留 `typing.List/Optional` 写法和

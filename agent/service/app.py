@@ -55,6 +55,8 @@ from agent.service.db import (
     SessionRow,
     ToolCallRow,
     get_database,
+    load_kb_versions,
+    record_kb_version,
     reset_database,
 )
 from agent.service.faults import DegradingLLM, FaultyLLM
@@ -334,7 +336,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         app.state.settings = settings
         reset_database()
         db = get_database(settings.database_url, settings.db_echo)
-        db.init()
+        db.init(create_all_tables=settings.auto_create_schema)
         app.state.db = db
         app.state.kv = build_kv(settings.kv_backend, settings.redis_url,
                                settings.kv_sqlite_path)
@@ -358,6 +360,42 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             version=f"v1-{default_kb.checksum()[:8]}")
         for model in settings.allowed_models:
             kb_registry.activate(initial.version, model, 100)
+        # ── 从表里恢复历史状态（否则灰度做到一半、一重启就回到 v1）──
+        # 顺序很关键：**先应用所有 active、再应用所有 shadow**。
+        # 第一版按 built_at 排序恢复，结果启动时"重写 v1 记录"刷新了它的时间戳，
+        # 于是 v1 排在 v2 之后、把灰度状态 pop 掉了——表现为"重启后 shadow 消失"。
+        # 语义上 shadow 本来就是对 active 的修饰，分两趟应用与时间戳无关，天然正确。
+        history = load_kb_versions(db)
+        restored = 0
+        for wanted in ("active", "shadow"):
+            for row in [r for r in history if r["status"] == wanted]:
+                path = str(row["path"] or "")
+                version = str(row["version"] or "")
+                model = str(row["vehicle_model"] or "")
+                if not version or not model:
+                    continue
+                if kb_registry.get(version) is None:
+                    if not path or not os.path.isfile(path):
+                        logger.warning("知识库版本 %s 的文件不存在，跳过恢复：%s",
+                                       version, path)
+                        continue
+                    try:
+                        kb_registry.register(path, model, version)
+                    except Exception as exc:                        # noqa: BLE001
+                        logger.warning("恢复知识库版本 %s 失败：%s", version, exc)
+                        continue
+                kb_registry.activate(version, model, int(row["traffic_pct"] or 100))
+                restored += 1
+        # 初始版本入库放在恢复之后：避免把"已经是 shadow/archived"的 v1 又刷成 active。
+        known = {(str(r["vehicle_model"] or ""), str(r["version"] or "")) for r in history}
+        for model in settings.allowed_models:
+            if (model, initial.version) in known:
+                continue
+            record_kb_version(db, vehicle_model=model, version=initial.version,
+                              path=initial.path, checksum=initial.checksum,
+                              n_chunks=initial.n_chunks, status="active", traffic_pct=100)
+        if restored:
+            logger.info("已从 kb_versions 表恢复 %d 条版本状态", restored)
         app.state.kb_registry = kb_registry
         app.state.started_at = time.time()
         # 停机状态（BE8）：inflight 是"正在处理中的请求数"，drain 靠它判断能不能退出
@@ -726,6 +764,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         except Exception as exc:                                   # noqa: BLE001
             raise HTTPException(status_code=400, detail=f"注册失败：{exc}") from exc
         METRICS.inc("agent_kb_version_registered_total")
+        record_kb_version(_db(request), vehicle_model=record.vehicle_model,
+                          version=record.version, path=record.path,
+                          checksum=record.checksum, n_chunks=record.n_chunks,
+                          status="archived", traffic_pct=0)
         _audit(request, principal, "kb_register", record.version, record.to_dict())
         return record.to_dict()
 
@@ -745,6 +787,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         METRICS.inc("agent_kb_version_activated_total",
                     {"pct": str(body.traffic_pct if body.traffic_pct in (0, 100) else "gray")})
+        record_kb_version(_db(request), vehicle_model=record.vehicle_model,
+                          version=record.version, path=record.path,
+                          checksum=record.checksum, n_chunks=record.n_chunks,
+                          status=record.status, traffic_pct=record.traffic_pct)
         _audit(request, principal, "kb_activate", body.version,
                {"traffic_pct": body.traffic_pct, "vehicle_model": body.vehicle_model})
         return record.to_dict()
@@ -761,6 +807,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         except KeyError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         METRICS.inc("agent_kb_version_rollback_total")
+        record_kb_version(_db(request), vehicle_model=record.vehicle_model,
+                          version=record.version, path=record.path,
+                          checksum=record.checksum, n_chunks=record.n_chunks,
+                          status="active", traffic_pct=100)
         _audit(request, principal, "kb_rollback", record.version, record.to_dict())
         return record.to_dict()
 

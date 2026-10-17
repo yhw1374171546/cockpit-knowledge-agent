@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 from contextlib import contextmanager
 from datetime import date, datetime
-from typing import Iterator, Optional
+from typing import Dict, Iterator, List, Optional
 
 from sqlalchemy import (
     Boolean,
@@ -172,8 +172,50 @@ class KbVersion(Base):
     vehicle_model = Column(String(64), index=True)
     source_file = Column(String(255))
     n_chunks = Column(Integer, default=0)
-    status = Column(String(16), default="active")     # building | active | archived
+    status = Column(String(16), default="active")     # building | active | shadow | archived
     built_at = Column(DateTime, default=datetime.utcnow)
+    # ── 版本化所需的字段（BE5 拿到 Alembic 之后才敢加列）──
+    # 之前没有迁移机制，加列会让老库直接报 "no such column"，
+    # 所以当时用 source_file 承载 "version|path" 这个折中；现在靠迁移补上正式字段。
+    version = Column(String(64), index=True, default="")
+    checksum = Column(String(32), default="")
+    traffic_pct = Column(Integer, default=100)
+
+
+def record_kb_version(db: "Database", *, vehicle_model: str, version: str, path: str,
+                      checksum: str, n_chunks: int, status: str,
+                      traffic_pct: int = 100) -> None:
+    """把知识库版本状态写进表（同一 (租户, 版本) 做 upsert）。
+
+    这张表以前**定义了但零使用**——表结构在那儿、语义在那儿，却没人写。
+    现在它承担两件事：① 审计留痕（谁在什么时候把哪版设成 active/shadow/archived）；
+    ② **进程重启后的状态恢复**（否则灰度做到一半、一重启就回到 v1）。
+    """
+    with db.session() as session:
+        row = (session.query(KbVersion)
+               .filter(KbVersion.vehicle_model == vehicle_model,
+                       KbVersion.version == version)
+               .one_or_none())
+        if row is None:
+            row = KbVersion(vehicle_model=vehicle_model, version=version)
+            row.source_file = path
+            session.add(row)
+        row.source_file = path
+        row.n_chunks = int(n_chunks)
+        row.checksum = checksum
+        row.status = status
+        row.traffic_pct = int(traffic_pct)
+        row.built_at = datetime.utcnow()
+
+
+def load_kb_versions(db: "Database") -> List[Dict[str, object]]:
+    """读取全部版本状态（供启动时恢复 active/shadow 路由）。"""
+    with db.session() as session:
+        rows = session.query(KbVersion).order_by(KbVersion.built_at).all()
+        return [{"vehicle_model": r.vehicle_model or "", "version": r.version or "",
+                 "path": r.source_file or "", "checksum": r.checksum or "",
+                 "n_chunks": int(r.n_chunks or 0), "status": r.status or "",
+                 "traffic_pct": int(r.traffic_pct or 100)} for r in rows]
 
 
 class Database:
@@ -197,8 +239,16 @@ class Database:
 
         self._maker = sessionmaker(bind=self.engine, autoflush=False, expire_on_commit=False)
 
-    def init(self) -> None:
-        Base.metadata.create_all(self.engine)
+    def init(self, create_all_tables: bool = True) -> None:
+        """初始化表结构。
+
+        `create_all_tables=True` 只用于**开发/测试**：`create_all` 只建不存在的表，
+        **永远不会修改已有表**——所以给老库加列时它什么也不做，新代码一查就
+        `no such column`。生产必须用 `alembic upgrade head`（BE5），
+        这里通过 `SERVICE_AUTO_CREATE_SCHEMA=0` 关掉自动建表。
+        """
+        if create_all_tables:
+            Base.metadata.create_all(self.engine)
 
     @contextmanager
     def session(self) -> Iterator:

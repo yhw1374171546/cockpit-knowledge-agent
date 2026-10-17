@@ -15,3 +15,6 @@ httpx>=0.27
 # 可选（生产多实例）
 # redis>=5.0
 # psycopg[binary]>=3.1      # PostgreSQL 驱动：SERVICE_DATABASE_URL=postgresql+psycopg://...
+
+# 数据库迁移（BE5）：生产表结构变更必须走迁移，不能靠 create_all
+alembic>=1.13
