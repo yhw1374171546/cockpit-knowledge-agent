@@ -59,6 +59,7 @@ class ChatResponse(BaseModel):
     quota: Optional[Dict[str, Any]] = None
     idempotent_replay: bool = False
     cached: bool = Field(False, description="本次回答是否直接命中语义缓存（未调用大模型）")
+    kb_version: str = Field("", description="本次回答使用的知识库版本（灰度/回滚可追溯）")
     degraded: bool = Field(False, description="是否走了降级链路（主推理后端不可用）")
     degrade_reason: str = ""
 
@@ -108,3 +109,22 @@ class ErrorResponse(BaseModel):
     error: str
     detail: str = ""
     trace_id: str = ""
+
+
+class KBRegisterRequest(BaseModel):
+    """注册一个新的知识库版本。"""
+    path: str = Field(..., description="语料文件路径（jsonl/txt）")
+    vehicle_model: str = Field("", description="所属车型租户；空则用服务默认租户")
+    version: str = Field("", description="版本号；空则自动生成 v<n>-<checksum8>")
+
+
+class KBActivateRequest(BaseModel):
+    """切换/灰度生效版本。traffic_pct：100=全量切换；1~99=灰度；0=撤销灰度。"""
+    version: str
+    vehicle_model: str = ""
+    traffic_pct: int = Field(100, ge=0, le=100)
+
+
+class KBRollbackRequest(BaseModel):
+    """回滚到上一个生效版本。"""
+    vehicle_model: str = ""

@@ -23,7 +23,7 @@ import os
 import re
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_KB = os.path.join(ROOT, "all_text.txt")
@@ -205,8 +205,12 @@ def clamp_query(query: str, max_chars: int = MAX_QUERY_CHARS) -> str:
 class KnowledgeBase:
     chunks: List[Chunk] = field(default_factory=list)
     tokenizer: Tokenizer = field(default_factory=Tokenizer)
+    path: str = ""                       # 语料来源（向量索引目录由它派生）
     _bm25: Optional[BM25Index] = None
-    _vector: object = None
+    # (编码器, VectorStore)：编码器把文本映射成归一化向量
+    _vector: Optional[Tuple[Callable[..., Any], Any]] = None
+    _vector_source: str = ""             # cache | built | ""（可观测：这次是读盘还是重建）
+    _vector_error: str = ""              # 向量路降级原因（不抛异常，但必须留痕）
 
     # -- 加载 ----------------------------------------------------------
     @classmethod
@@ -226,9 +230,12 @@ class KnowledgeBase:
 
     @classmethod
     def load(cls, path: Optional[str] = None, prefer_jieba: bool = True,
-             with_vector: bool = False, vector_model: Optional[str] = None) -> "KnowledgeBase":
+             with_vector: bool = False, vector_model: Optional[str] = None,
+             vector_cache_dir: Optional[str] = None,
+             force_vector_rebuild: bool = False) -> "KnowledgeBase":
         path = cls.resolve_path(path)
-        kb = cls(tokenizer=Tokenizer(prefer_jieba))
+        # 记下语料路径：向量索引的落盘目录由它派生（`<语料>.vec/`）
+        kb = cls(tokenizer=Tokenizer(prefer_jieba), path=path)
         if path.endswith(".jsonl"):
             with open(path, encoding="utf-8") as f:
                 for line in f:
@@ -249,18 +256,85 @@ class KnowledgeBase:
                     kb.chunks.append(Chunk(id=i, text=text))
         kb.build_index()
         if with_vector:
-            kb.enable_vector(vector_model)
+            kb.enable_vector(vector_model, cache_dir=vector_cache_dir,
+                             force_rebuild=force_vector_rebuild)
         return kb
 
     def build_index(self) -> None:
         self._bm25 = BM25Index([self.tokenizer.cut(c.text) for c in self.chunks])
 
+    # -- 向量目录与指纹 -------------------------------------------------
+    @staticmethod
+    def vector_dir(kb_path: str) -> str:
+        """向量索引的落盘目录：与语料同目录的 `<语料文件名>.vec/`。"""
+        return str(kb_path) + ".vec"
+
+    def checksum(self) -> str:
+        """语料指纹，用于判断"落盘索引是否还对应当前语料"。"""
+        from agent.vector_store import compute_checksum
+
+        return compute_checksum(self.chunks)
+
     # -- 可选向量路 ----------------------------------------------------
-    def enable_vector(self, model_path: Optional[str] = None) -> bool:
-        """启用 m3e-large + FAISS 语义召回；依赖缺失时静默降级为纯 BM25。"""
+    def enable_vector(self, model_path: Optional[str] = None,
+                      cache_dir: Optional[str] = None,
+                      force_rebuild: bool = False,
+                      encoder: Optional[Callable[[Sequence[str]], object]] = None,
+                      model_id: Optional[str] = None) -> bool:
+        """启用向量召回。
+
+        **默认走落盘索引**：索引存在且 checksum/模型都匹配时直接读盘（毫秒级），
+        否则才嵌入并落盘。这修掉了原来"每次启动重新嵌入 9,301 块"的问题。
+
+        `encoder` 参数用于注入自定义编码器（测试用确定性桩编码器，无需 GPU/模型）。
+        """
+        try:
+            import faiss  # type: ignore  # noqa: F401  仅用于探测依赖是否齐备
+
+            from agent.vector_store import VectorStore
+        except Exception:                                      # noqa: BLE001
+            self._vector = None
+            return False
+
+        cache_dir = cache_dir or (self.vector_dir(self.path) if self.path else None)
+        model_id = model_id or (os.path.basename(model_path) if model_path else "custom")
+        checksum = self.checksum()
+
+        try:
+            if encoder is None:
+                encoder = self._build_m3e_encoder(model_path)
+            if encoder is None:
+                self._vector = None
+                return False
+
+            store = None
+            if cache_dir and not force_rebuild:
+                store = VectorStore.load(cache_dir, expect_checksum=checksum,
+                                         expect_model=model_id)
+                if store is not None:
+                    self._vector = (encoder, store)
+                    self._vector_source = "cache"
+                    return True
+
+            matrix = encoder([c.text for c in self.chunks])
+            store = VectorStore.build(matrix, model_id=model_id, chunks_checksum=checksum,
+                                      source=str(self.path or ""))
+            if cache_dir:
+                store.save(cache_dir)                          # 落盘，下次启动直接读
+            self._vector = (encoder, store)
+            self._vector_source = "built"
+            return True
+        except Exception as exc:                               # noqa: BLE001
+            # 向量路是可选增强：任何失败都只降级为纯 BM25，不能拖垮 Agent 启动
+            self._vector = None
+            self._vector_error = f"{type(exc).__name__}: {exc}"
+            return False
+
+    @staticmethod
+    def _build_m3e_encoder(model_path: Optional[str]):
+        """构造 m3e 编码器；模型缺失时返回 None（由调用方降级）。"""
         model_path = model_path or os.path.join(ROOT, "pre_train_model", "m3e-large")
         try:
-            import faiss  # type: ignore
             import numpy as np  # type: ignore
             import torch  # type: ignore
             from transformers import AutoModel, AutoTokenizer  # type: ignore
@@ -270,7 +344,7 @@ class KnowledgeBase:
             device = "cuda" if torch.cuda.is_available() else "cpu"
             model = model.to(device)
 
-            def encode(texts: Sequence[str]) -> "np.ndarray":
+            def encode(texts: Sequence[str]):
                 vecs = []
                 for i in range(0, len(texts), 16):
                     batch = list(texts[i:i + 16])
@@ -284,26 +358,75 @@ class KnowledgeBase:
                     vecs.append(pooled.cpu().numpy().astype("float32"))
                 return np.vstack(vecs)
 
-            matrix = encode([c.text for c in self.chunks])
-            index = faiss.IndexFlatIP(matrix.shape[1])
-            index.add(matrix)
-            self._vector = (encode, index)
-            return True
-        except Exception:
-            self._vector = None
-            return False
+            return encode
+        except Exception:                                      # noqa: BLE001
+            return None
+
+    # -- 增量维护 ------------------------------------------------------
+    def upsert_chunks(self, new_chunks: Sequence[Chunk],
+                      cache_dir: Optional[str] = None) -> int:
+        """追加（或按 id 覆盖）知识块，并**增量更新**向量索引。
+
+        行为：新块追加到 `chunks` 尾部 → 只对**新块**做嵌入（不重嵌全量）→ 索引追加 →
+        BM25 重建（分词是秒级、且增量维护 df/idf 收益小）→ 有持久化目录时立即落盘。
+        返回实际写入的块数（含覆盖写）。
+        """
+        if not new_chunks:
+            return 0
+        existing = {c.id for c in self.chunks}
+        replaced = [c for c in new_chunks if c.id in existing]
+        if replaced:
+            # 覆盖语义：先把同 id 的旧版本删掉，再把新版本追加进来。
+            # ⚠️ 这里曾经写成"删完之后 if not to_add: return 0"——同 id 覆盖时
+            # to_add 恒为空，于是**只删不加**，旧内容消失了、新内容也没进来。
+            # 是 test_upsert_same_id_replaces_content 抓出来的。
+            self.remove_chunks([c.id for c in replaced])
+        self.chunks.extend(new_chunks)
+        if self._vector is not None:
+            encoder, store = self._vector
+            matrix = encoder([c.text for c in new_chunks])
+            store.add(matrix)
+            store.meta.chunks_checksum = self.checksum()
+            if cache_dir:
+                store.save(cache_dir)
+        self.build_index()                                     # BM25 重建
+        return len(new_chunks)
+
+    def remove_chunks(self, chunk_ids: Sequence[int], cache_dir: Optional[str] = None) -> int:
+        """按 id 删除知识块，并同步删掉向量索引里的对应行。
+
+        为什么必须支持删除：手册会改版，旧条款留在索引里就**会被检索到并当成现行规定**——
+        这在合规与安全上都是事故级问题（"我引用的还是去年的保养周期"）。
+        """
+        doomed = {int(i) for i in chunk_ids}
+        if not doomed:
+            return 0
+        positions = [i for i, c in enumerate(self.chunks) if int(c.id) in doomed]
+        if not positions:
+            return 0
+        self.chunks = [c for i, c in enumerate(self.chunks) if i not in set(positions)]
+        if self._vector is not None:
+            encoder, store = self._vector
+            store.remove(positions)
+            store.meta.chunks_checksum = self.checksum()
+            if cache_dir:
+                store.save(cache_dir)
+        self.build_index()
+        return len(positions)
 
     def search_vector(self, query: str, top_k: int = 15) -> List[Evidence]:
         if self._vector is None:
             return []
-        encode, index = self._vector  # type: ignore
+        encode, store = self._vector
         vec = encode([query])
-        scores, ids = index.search(vec, top_k)
+        scores, positions = store.search(vec, top_k)
         out = []
-        # strict=True：FAISS 返回的 scores/ids 是等长平行数组，
-        # 一旦不等长说明索引状态异常，宁可立刻报错也不要静默截断（错位会把答案张冠李戴）。
-        for score, idx in zip(scores[0], ids[0], strict=True):
+        # strict=True：scores 与 positions 是等长平行数组，一旦不等长说明索引状态异常，
+        # 宁可立刻报错也不要静默截断（错位会把答案张冠李戴）。
+        for score, idx in zip(scores, positions, strict=True):
             if idx < 0:
+                continue
+            if idx >= len(self.chunks):                            # 索引与语料不同步
                 continue
             c = self.chunks[int(idx)]
             out.append(Evidence(c.id, c.text, float(score), c.source, c.page, c.header, "vector"))

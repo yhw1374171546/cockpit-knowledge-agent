@@ -27,6 +27,7 @@ import asyncio
 import datetime as dt
 import json
 import logging
+import os
 import queue
 import threading
 import time
@@ -57,6 +58,7 @@ from agent.service.db import (
     reset_database,
 )
 from agent.service.faults import DegradingLLM, FaultyLLM
+from agent.service.kb_registry import KBRegistry
 from agent.service.kv import KVStore, build_kv
 from agent.service.metrics import METRICS
 from agent.service.schemas import (
@@ -67,6 +69,9 @@ from agent.service.schemas import (
     ErrorResponse,
     FeedbackRequest,
     HealthResponse,
+    KBActivateRequest,
+    KBRegisterRequest,
+    KBRollbackRequest,
     SessionInfo,
     TokenRequest,
     TokenResponse,
@@ -140,9 +145,12 @@ class AgentRuntime:
     def build_agent(self, vehicle_model: str, confirmed: Optional[set] = None,
                     on_delta: Optional[Callable[[str], None]] = None,
                     idempotency_key: str = "",
-                    history: Optional[List[Tuple[str, str]]] = None
+                    history: Optional[List[Tuple[str, str]]] = None,
+                    kb: Optional[KnowledgeBase] = None
                     ) -> Tuple[AgentGraph, Tracer, ToolRegistry]:
-        kb = self.kb(vehicle_model)
+        # kb 允许外部注入：多版本路由（灰度/回滚）时由 KBRegistry 决定用哪个版本的实例，
+        # 不再从这里按车型固定取缓存。
+        kb = kb if kb is not None else self.kb(vehicle_model)
         # 把**已缓存的 kb** 传进去：否则这里会从磁盘重新加载并重建 BM25 索引
         # （9301 块实测 ≈16 s/次，而单次检索只要 ≈12 ms），缓存就白做了。
         registry = build_default_registry(self.settings.kb_path or None, kb=kb)
@@ -183,6 +191,25 @@ class AgentRuntime:
 
 # ── 依赖 ─────────────────────────────────────────────────────────────
 
+
+# 管理类接口的权限门：知识库版本切换会影响**所有用户**，必须 service/admin。
+def _require_service(principal: Principal) -> None:
+    if getattr(principal, "role", "") not in ("service", "admin"):
+        raise HTTPException(status_code=403, detail="需要 service 或 admin 角色")
+
+
+def _audit(request: Request, principal: Principal, action: str, target: str,
+           after: Dict[str, Any]) -> None:
+    """把管理动作写进审计表——换手册/回滚必须留痕，否则"谁在什么时候切了哪版"说不清。"""
+    try:
+        with _db(request).session() as session:
+            AuditService(_db(request)).log_in_session(
+                session, principal.user_id, action, target,
+                before="", after=after, trace_id=_trace_id(request))
+    except Exception as exc:                                       # noqa: BLE001
+        logger.warning("审计写入失败 action=%s target=%s err=%s", action, target, exc)
+
+
 def _settings(request: Request) -> Settings:
     return request.app.state.settings
 
@@ -202,6 +229,11 @@ def _kv(request: Request) -> KVStore:
 def _cache(request: Request) -> Optional[SemanticCache]:
     """语义缓存实例（未启用时返回 None）。"""
     return getattr(request.app.state, "semantic_cache", None)
+
+
+def _kb_registry(request: Request):
+    """知识库版本注册表（决定本次请求用哪个版本）。"""
+    return getattr(request.app.state, "kb_registry", None)
 
 
 def principal_of(request: Request,
@@ -253,6 +285,17 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 ttl_seconds=settings.semantic_cache_ttl_s,
                 kv=app.state.kv if settings.semantic_cache_shared else None)
         app.state.runtime = AgentRuntime(settings)
+        # ── 知识库版本注册表（多版本共存 + 灰度 + 回滚）──
+        # 启动时把当前语料注册为 v1，并设为生效版本；换手册 = 注册新版本 + 灰度/切换，
+        # 不需要改配置重启（这是"线上怎么换手册、改错了怎么回滚"的答案）。
+        kb_registry = KBRegistry()
+        default_kb = app.state.runtime.kb(settings.default_vehicle_model)
+        initial = kb_registry.register_loaded(
+            default_kb, vehicle_model=settings.default_vehicle_model,
+            version=f"v1-{default_kb.checksum()[:8]}")
+        for model in settings.allowed_models:
+            kb_registry.activate(initial.version, model, 100)
+        app.state.kb_registry = kb_registry
         app.state.started_at = time.time()
         # 预热默认租户知识库，让 /readyz 有真实含义
         app.state.runtime.kb(settings.default_vehicle_model)
@@ -477,6 +520,70 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                             rating=body.rating, comment=body.comment[:1000]))
         return {"ok": True}
 
+    # ── 知识库版本管理（多版本 / 灰度 / 回滚）──
+    @app.get("/v1/admin/kb/versions", tags=["ops"], summary="列出知识库版本")
+    async def list_kb_versions(request: Request, vehicle_model: Optional[str] = None,
+                               principal: Principal = Depends(principal_of)):
+        _require_service(principal)
+        registry = _kb_registry(request)
+        records = registry.list(vehicle_model) if registry else []
+        return {"versions": [r.to_dict() for r in records],
+                "stats": registry.stats() if registry else {}}
+
+    @app.post("/v1/admin/kb/register", tags=["ops"], summary="注册新的知识库版本")
+    async def register_kb_version(request: Request, body: KBRegisterRequest,
+                                  principal: Principal = Depends(principal_of)):
+        """注册一个知识库文件为新版本（算 checksum、加载、入注册表），**不改变线上路由**。"""
+        _require_service(principal)
+        registry = _kb_registry(request)
+        if registry is None:
+            raise HTTPException(status_code=503, detail="知识库注册表不可用")
+        if not body.path or not os.path.isfile(body.path):
+            raise HTTPException(status_code=400, detail=f"文件不存在：{body.path}")
+        try:
+            record = registry.register(body.path, body.vehicle_model or settings.default_vehicle_model,
+                                       body.version)
+        except Exception as exc:                                   # noqa: BLE001
+            raise HTTPException(status_code=400, detail=f"注册失败：{exc}") from exc
+        METRICS.inc("agent_kb_version_registered_total")
+        _audit(request, principal, "kb_register", record.version, record.to_dict())
+        return record.to_dict()
+
+    @app.post("/v1/admin/kb/activate", tags=["ops"], summary="切换/灰度生效知识库版本")
+    async def activate_kb_version(request: Request, body: KBActivateRequest,
+                                  principal: Principal = Depends(principal_of)):
+        """`traffic_pct` 三态：100=全量切换（可回滚）；1~99=灰度；0=撤销灰度。"""
+        _require_service(principal)
+        registry = _kb_registry(request)
+        if registry is None:
+            raise HTTPException(status_code=503, detail="知识库注册表不可用")
+        try:
+            record = registry.activate(body.version,
+                                       body.vehicle_model or settings.default_vehicle_model,
+                                       body.traffic_pct)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        METRICS.inc("agent_kb_version_activated_total",
+                    {"pct": str(body.traffic_pct if body.traffic_pct in (0, 100) else "gray")})
+        _audit(request, principal, "kb_activate", body.version,
+               {"traffic_pct": body.traffic_pct, "vehicle_model": body.vehicle_model})
+        return record.to_dict()
+
+    @app.post("/v1/admin/kb/rollback", tags=["ops"], summary="回滚到上一个生效版本")
+    async def rollback_kb_version(request: Request, body: KBRollbackRequest,
+                                  principal: Principal = Depends(principal_of)):
+        _require_service(principal)
+        registry = _kb_registry(request)
+        if registry is None:
+            raise HTTPException(status_code=503, detail="知识库注册表不可用")
+        try:
+            record = registry.rollback(body.vehicle_model or settings.default_vehicle_model)
+        except KeyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        METRICS.inc("agent_kb_version_rollback_total")
+        _audit(request, principal, "kb_rollback", record.version, record.to_dict())
+        return record.to_dict()
+
     # ── 指标（Prometheus 文本格式，零依赖手写）──
     @app.get("/metrics", tags=["ops"], summary="Prometheus 指标",
              response_class=PlainTextResponse)
@@ -630,9 +737,21 @@ def _run_and_persist(request: Request, ctx: Dict[str, Any],
 
     confirmed = ConfirmationStore(db).load(ctx["user_id"])
     history = _load_history(db, ctx["session_id"])
+
+    # ── 知识库版本路由（多版本共存 / 灰度 / 回滚）──
+    # 灰度命中时用"影子版本"的 KB 实例；同一用户的分桶是稳定的，不会在一次会话里跳版本。
+    kb_registry = _kb_registry(request)
+    kb_version, versioned_kb = "", None
+    if kb_registry is not None:
+        record = kb_registry.resolve(ctx["vehicle_model"], ctx["user_id"])
+        kb_version = record.version
+        versioned_kb = kb_registry.kb_for(record.version)
+        METRICS.inc("agent_kb_version_routed_total", {"version": record.version})
+
     agent, tracer, registry = runtime.build_agent(
         ctx["vehicle_model"], confirmed, on_delta,
-        idempotency_key=ctx.get("idempotency_key") or "", history=history)
+        idempotency_key=ctx.get("idempotency_key") or "", history=history,
+        kb=versioned_kb)
 
     # ── 语义缓存：命中则**完全跳过** agent.run()（省一次检索 + 一次大模型调用）──
     # 键的作用域是「车型租户」，指纹里包含车况与角色：
@@ -641,7 +760,9 @@ def _run_and_persist(request: Request, ctx: Dict[str, Any],
     cache = _cache(request)
     fingerprint = SemanticCache.fingerprint(getattr(registry, "telemetry", {}) or {},
                                             role=getattr(ctx.get("principal"), "role", "driver"))
-    scope = ctx["vehicle_model"]
+    # 作用域必须含**知识库版本**：否则切换/灰度版本之后，语义缓存仍会把旧版本的答案返给新版本
+    # 的请求——"版本切了但回答还是老的"，这是比缓存不命中严重得多的正确性问题。
+    scope = f"{ctx['vehicle_model']}|{kb_version}"
     # 有历史的多轮请求不查缓存：同一个问法在不同上下文里的含义可能不同（指代/话题继承）。
     cacheable_req = (cache is not None and not ctx.get("idempotency_key")
                      and not history and len(ctx["message"]) >= 4)
@@ -780,7 +901,7 @@ def _run_and_persist(request: Request, ctx: Dict[str, Any],
             tokens_in=tokens_in, tokens_out=tokens_out, cost_usd=cost,
             latency_ms=round(latency_ms, 2), ttft_ms=round(latency_ms, 2),
             degraded=degraded, degrade_reason=degrade_reason,
-            cached=cache_hit,
+            cached=cache_hit, kb_version=kb_version,
             quota={"used": quota.used, "limit": quota.limit, "remaining": quota.remaining})
         # 领域指标：token/成本/工具调用/护栏拦截
         METRICS.inc("agent_tokens_total", {"kind": "input"}, tokens_in)

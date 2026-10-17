@@ -786,5 +786,184 @@ class TestSharedSemanticCache(unittest.TestCase):
         self.assertFalse(hit.hit)
 
 
+
+class TestKBVersioning(ServiceTestBase):
+    """② 知识库版本化 + 灰度 + 回滚。
+
+    以前换手册 = 改配置 + 重启，没有版本概念、没有灰度、出问题只能再改回去重启。
+    这组测试要证明三件事：版本可注册、灰度能按用户稳定分桶、回滚一条命令生效。
+    """
+
+    # ── 工具 ──
+    def _write_corpus(self, name: str, extra_text: str = "", mutate_first: bool = True) -> str:
+        """基于迷你语料生成第二个版本（内容有差异，checksum 必须不同）。"""
+        import json as _json
+
+        rows = []
+        with open(FIXTURE, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    rows.append(_json.loads(line))
+        if mutate_first and rows:
+            rows[0]["text"] = "（新版）" + rows[0]["text"]
+        if extra_text:
+            rows.append({"id": 9001, "text": extra_text, "source": "manual_v2.pdf",
+                         "page": 88, "header": "新章节"})
+        target = os.path.join(self._tmp.name, name)
+        with open(target, "w", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write(_json.dumps(row, ensure_ascii=False) + "\n")
+        return target
+
+    def _service_headers(self) -> dict:
+        return self._auth_headers(self._token("svc", "service", "lynk08"))
+
+    def _register(self, path: str, version: str = "") -> dict:
+        resp = self.client.post("/v1/admin/kb/register",
+                                json={"path": path, "version": version,
+                                      "vehicle_model": "lynk08"},
+                                headers=self._service_headers())
+        self.assertEqual(resp.status_code, 200, resp.text)
+        return resp.json()
+
+    # ── 用例 ──
+    def test_response_carries_kb_version(self):
+        """每次回答都要能追溯"用了哪一版知识库"。"""
+        body = self.chat("座椅加热怎么关闭").json()
+        self.assertTrue(body.get("kb_version", "").startswith("v1-"),
+                        f"响应未带 kb_version：{body.get('kb_version')!r}")
+
+    def test_list_versions_requires_service_role(self):
+        driver = self.client.get("/v1/admin/kb/versions", headers=self.h)
+        self.assertEqual(driver.status_code, 403)
+        ok = self.client.get("/v1/admin/kb/versions", headers=self._service_headers())
+        self.assertEqual(ok.status_code, 200, ok.text)
+        versions = ok.json()["versions"]
+        self.assertTrue(versions)
+        self.assertEqual(len({v["checksum"] for v in versions}), len(versions),
+                         "不同版本的 checksum 不应重复")
+
+    def test_register_then_full_switch(self):
+        """注册新版本 → 全量切换 → 回答来自新版本，且新内容可被检索到。"""
+        before = self.chat("座椅加热怎么关闭").json()
+        path = self._write_corpus("corpus_v2.jsonl", extra_text="（新版新增）电动尾门支持脚踢开启。")
+        record = self._register(path)
+        self.assertNotEqual(record["checksum"], before["kb_version"].split("-", 1)[1][:8],
+                            "新版本 checksum 与旧版相同，说明语料没差异")
+
+        switched = self.client.post("/v1/admin/kb/activate",
+                                    json={"version": record["version"], "traffic_pct": 100,
+                                          "vehicle_model": "lynk08"},
+                                    headers=self._service_headers())
+        self.assertEqual(switched.status_code, 200, switched.text)
+
+        after = self.chat("电动尾门脚踢开启").json()
+        self.assertEqual(after["kb_version"], record["version"], "切换后未使用新版本")
+        self.assertIn("脚踢", after["answer"] + "".join(after["citations"]),
+                      "新版本内容没有被检索到")
+
+    def test_gray_rollout_is_deterministic_per_user(self):
+        """灰度：同一用户稳定落同一版本（不会在会话中跳版），不同用户会分散。"""
+        path = self._write_corpus("corpus_gray.jsonl", extra_text="（灰度版）后备箱应急拉手在盖板下。")
+        record = self._register(path)
+        self.client.post("/v1/admin/kb/activate",
+                         json={"version": record["version"], "traffic_pct": 50,
+                               "vehicle_model": "lynk08"},
+                         headers=self._service_headers())
+
+        seen = {}
+        for user in [f"gray-u{i}" for i in range(20)]:
+            token = self._token(user, "driver", "lynk08")
+            headers = self._auth_headers(token)
+            first = self.chat("胎压多少算正常", headers=headers).json()["kb_version"]
+            second = self.chat("危险警告灯怎么用", headers=headers).json()["kb_version"]
+            self.assertEqual(first, second, f"用户 {user} 在同一会话里跳了版本")
+            seen.setdefault(first, 0)
+            seen[first] += 1
+
+        active = self.app.state.kb_registry.active_version("lynk08")
+        self.assertEqual(set(seen), {active, record["version"]},
+                         f"灰度只应出现两版本（原版+灰度版），实际：{seen}")
+        self.assertEqual(len(seen), 2, f"灰度没有把用户分到两个版本：{seen}")
+
+    def test_rollback_restores_previous_version(self):
+        original = self.app.state.kb_registry.active_version("lynk08")
+        path = self._write_corpus("corpus_v3.jsonl")
+        record = self._register(path)
+        self.client.post("/v1/admin/kb/activate",
+                         json={"version": record["version"], "traffic_pct": 100,
+                               "vehicle_model": "lynk08"},
+                         headers=self._service_headers())
+        self.assertEqual(self.chat("座椅加热怎么关闭").json()["kb_version"], record["version"])
+
+        rolled = self.client.post("/v1/admin/kb/rollback",
+                                  json={"vehicle_model": "lynk08"},
+                                  headers=self._service_headers())
+        self.assertEqual(rolled.status_code, 200, rolled.text)
+        self.assertEqual(rolled.json()["version"], original)
+        self.assertEqual(self.chat("座椅加热怎么关闭").json()["kb_version"], original,
+                         "回滚后回答仍来自新版本")
+
+        again = self.client.post("/v1/admin/kb/rollback", json={"vehicle_model": "lynk08"},
+                                 headers=self._service_headers())
+        self.assertEqual(again.status_code, 409, "没有历史版本时回滚应报 409 而不是静默成功")
+
+    def test_cache_does_not_leak_across_versions(self):
+        """切换版本后，同一个问题不能命中旧版本缓存——否则"版本切了回答还是老的"。"""
+        question = "座椅加热怎么关闭"
+        first = self.chat(question).json()
+        self.assertFalse(first["cached"])
+        again = self.chat(question).json()
+        self.assertTrue(again["cached"], "同版本下第二次应命中缓存（前置条件）")
+
+        path = self._write_corpus("corpus_v4.jsonl", mutate_first=True)
+        record = self._register(path)
+        self.client.post("/v1/admin/kb/activate",
+                         json={"version": record["version"], "traffic_pct": 100,
+                               "vehicle_model": "lynk08"},
+                         headers=self._service_headers())
+
+        after = self.chat(question).json()
+        self.assertEqual(after["kb_version"], record["version"])
+        self.assertFalse(after["cached"], "切换版本后仍命中了旧版本的缓存")
+
+    def test_activate_unknown_version_returns_404(self):
+        resp = self.client.post("/v1/admin/kb/activate",
+                                json={"version": "v999-deadbeef", "traffic_pct": 100},
+                                headers=self._service_headers())
+        self.assertEqual(resp.status_code, 404)
+
+    def test_register_without_version_auto_names(self):
+        """接口里 `version` 默认是空串：必须自动生成 v<n>-<checksum8>。
+
+        这是真踩过的坑：`register` 原来只判 `version is None`，而 HTTP 请求体默认给的是 `""`，
+        于是注册出一个**版本号为空串**的版本，路由结果里 `kb_version` 变成 `""`——
+        接口看起来 200 成功，但版本语义已经错了（版本列表里也认不出是哪一版）。
+        """
+        path = self._write_corpus("corpus_auto.jsonl")
+        record = self._register(path, version="")
+        self.assertTrue(record["version"], "版本号为空——空版本会污染路由表")
+        self.assertTrue(record["version"].startswith("v"), record["version"])
+        self.assertIn(record["checksum"][:8], record["version"],
+                      "自动生成的版本号里应带语料指纹")
+        routed = self.chat("座椅加热怎么关闭").json()["kb_version"]
+        self.assertTrue(routed, "响应里的 kb_version 是空串")
+        self.assertEqual(routed, self.app.state.kb_registry.active_version("lynk08"))
+
+    def test_register_missing_file_returns_400(self):
+        resp = self.client.post("/v1/admin/kb/register",
+                                json={"path": os.path.join(self._tmp.name, "nope.jsonl")},
+                                headers=self._service_headers())
+        self.assertEqual(resp.status_code, 400)
+
+    def test_register_and_switch_requires_role(self):
+        path = self._write_corpus("corpus_perm.jsonl")
+        resp = self.client.post("/v1/admin/kb/register",
+                                json={"path": path, "vehicle_model": "lynk08"},
+                                headers=self.h)          # driver
+        self.assertEqual(resp.status_code, 403, "普通用户不应能注册/切换知识库版本")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
