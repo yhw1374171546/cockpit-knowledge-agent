@@ -83,6 +83,9 @@ class Settings:
     semantic_cache_ttl_s: float = 3600.0
     semantic_cache_shared: bool = True       # True=落 KV（多副本共享）；False=纯进程内
 
+    # 优雅停机（BE8）：等在途请求排空的上限；超过则强制关闭（不无限拉长停机窗口）
+    shutdown_grace_s: float = 20.0
+
     # 指标暴露：默认仅 service/admin 可访问；置 1 则公开（Prometheus 抓取用）
     metrics_public: bool = False
 
@@ -134,6 +137,7 @@ class Settings:
             semantic_cache_ttl_s=_float("SERVICE_SEMANTIC_CACHE_TTL_S", 3600.0),
             semantic_cache_shared=os.environ.get("SERVICE_SEMANTIC_CACHE_SHARED", "1").lower()
             not in ("0", "false"),
+            shutdown_grace_s=_float("SERVICE_SHUTDOWN_GRACE_S", 20.0),
             metrics_public=os.environ.get("SERVICE_METRICS_PUBLIC", "0").lower() in ("1", "true"),
             kb_path=os.environ.get("AGENT_KB_PATH", ""),
             default_vehicle_model=os.environ.get("SERVICE_DEFAULT_VEHICLE_MODEL", "lynk08"),

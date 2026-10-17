@@ -128,3 +128,10 @@ class KBActivateRequest(BaseModel):
 class KBRollbackRequest(BaseModel):
     """回滚到上一个生效版本。"""
     vehicle_model: str = ""
+
+
+class ShutdownPrepareRequest(BaseModel):
+    """请求实例进入停机准备（摘流量 + 排空在途请求）。"""
+    reason: str = Field("prestop", description="停机原因，写进审计")
+    grace_s: float = Field(0.0, ge=0.0, le=600.0,
+                           description="排空等待上限（秒）；0 表示用服务端默认 SERVICE_SHUTDOWN_GRACE_S")

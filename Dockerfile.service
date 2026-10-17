@@ -25,9 +25,16 @@ USER appuser
 
 EXPOSE 8077
 
-# 就绪检查走 /readyz（DB、KV、知识库都可用才算 ready）
+# 就绪检查走 /readyz（DB、KV、知识库都可用才算 ready）。
+# 注意：停机准备期间 /readyz 会返回 503 —— 这是**有意为之**，让 LB 先把流量摘走。
 HEALTHCHECK --interval=15s --timeout=5s --start-period=90s --retries=3 \
     CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8077/readyz',timeout=4).status==200 else 1)"
 
+# ── 优雅停机（BE8）──
+# `--timeout-graceful-shutdown` 给 uvicorn 的排空窗口；配合应用内的 drain(20s)，
+# 容器 stop 的宽限期要**大于两者之和**（compose 里设了 stop_grace_period: 40s）。
+# 另外用 exec 形式启动，保证 SIGTERM 直接打到 uvicorn 进程（而非 shell），信号不会被吞掉。
+STOPSIGNAL SIGTERM
 CMD ["python", "-m", "uvicorn", "agent.service.app:app", \
-     "--host", "0.0.0.0", "--port", "8077", "--log-level", "info"]
+     "--host", "0.0.0.0", "--port", "8077", "--log-level", "info", \
+     "--timeout-graceful-shutdown", "30"]

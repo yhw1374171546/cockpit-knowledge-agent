@@ -73,6 +73,7 @@ from agent.service.schemas import (
     KBRegisterRequest,
     KBRollbackRequest,
     SessionInfo,
+    ShutdownPrepareRequest,
     TokenRequest,
     TokenResponse,
     ToolCallInfo,
@@ -192,6 +193,52 @@ class AgentRuntime:
 # ── 依赖 ─────────────────────────────────────────────────────────────
 
 
+
+# ══ 优雅停机（BE8）══════════════════════════════════════════════════
+# 为什么需要它：滚动发布/缩容时进程收到 SIGTERM 就退出，**在途请求会被硬切**——
+# 用户看到 500 或半个流式答案，而且此前做的降级链在发布瞬间完全没用（它救不了被砍断的连接）。
+# 做法是标准的三段式：**先把流量摘掉（/readyz 503）→ 等排空（有上限）→ 再关资源**。
+# 顺序不能反：先关资源会让在途请求直接失败。
+
+def _inflight_inc(app: FastAPI) -> int:
+    with app.state.inflight_lock:
+        app.state.inflight += 1
+        return app.state.inflight
+
+
+def _inflight_dec(app: FastAPI) -> int:
+    with app.state.inflight_lock:
+        app.state.inflight = max(0, app.state.inflight - 1)
+        return app.state.inflight
+
+
+def prepare_shutdown(app: FastAPI, reason: str = "manual", grace_s: float = 20.0) -> Dict[str, Any]:
+    """进入"停机准备"状态：/readyz 立刻返回 503，但**继续服务在途与短时新请求**。
+
+    生产环境应当由 K8s 的 preStop hook 调用（`POST /v1/admin/shutdown/prepare`），
+    给负载均衡器留出摘流量的时间——这是"优雅停机"里最容易被漏掉的一环：
+    进程自己排空了，但 LB 还在往它上面转发。
+    """
+    app.state.shutting_down = True
+    app.state.shutdown_reason = reason
+    app.state.shutdown_deadline = time.time() + max(0.0, grace_s)
+    logger.warning("进入停机准备 reason=%s grace=%.1fs inflight=%s",
+                   reason, grace_s, app.state.inflight)
+    return {"shutting_down": True, "reason": reason, "grace_s": grace_s,
+            "inflight": app.state.inflight}
+
+
+def drain(app: FastAPI, timeout: float = 20.0, poll_s: float = 0.05) -> bool:
+    """等待在途请求归零；超时返回 False（**不阻塞退出**，否则停机窗口会无限拉长）。"""
+    deadline = time.time() + max(0.0, timeout)
+    while time.time() < deadline:
+        with app.state.inflight_lock:
+            if app.state.inflight <= 0:
+                return True
+        time.sleep(poll_s)
+    return False
+
+
 # 管理类接口的权限门：知识库版本切换会影响**所有用户**，必须 service/admin。
 def _require_service(principal: Principal) -> None:
     if getattr(principal, "role", "") not in ("service", "admin"):
@@ -297,6 +344,12 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             kb_registry.activate(initial.version, model, 100)
         app.state.kb_registry = kb_registry
         app.state.started_at = time.time()
+        # 停机状态（BE8）：inflight 是"正在处理中的请求数"，drain 靠它判断能不能退出
+        app.state.inflight = 0
+        app.state.inflight_lock = threading.Lock()
+        app.state.shutting_down = False
+        app.state.shutdown_reason = ""
+        app.state.shutdown_deadline = 0.0
         # 预热默认租户知识库，让 /readyz 有真实含义
         app.state.runtime.kb(settings.default_vehicle_model)
         if settings.jwt_secret == "dev-secret-change-me":
@@ -309,6 +362,17 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         try:
             yield
         finally:
+            # 优雅停机：先摘流量（/readyz 已因 shutting_down 返回 503），再等排空，最后关资源。
+            prepare_shutdown(app, "lifespan_exit", settings.shutdown_grace_s)
+            drained = drain(app, settings.shutdown_grace_s)
+            with app.state.inflight_lock:
+                left = app.state.inflight
+            if drained:
+                logger.info("优雅停机完成：在途请求已排空")
+            else:
+                logger.warning("优雅停机超时：仍有 %s 个在途请求，强制关闭（上限 %.0fs）",
+                               left, settings.shutdown_grace_s)
+            METRICS.inc("agent_shutdown_total", {"drained": str(drained).lower()})
             db.engine.dispose()
 
     app = FastAPI(title="智能座舱 Agent 服务", version=settings.version,
@@ -321,7 +385,12 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         trace_id = request.headers.get("X-Trace-Id") or uuid.uuid4().hex[:16]
         request.state.trace_id = trace_id
         start = time.perf_counter()
-        response = await call_next(request)
+        # 在途计数必须用 try/finally：异常路径也要减一，否则排空会永远等下去
+        _inflight_inc(request.app)
+        try:
+            response = await call_next(request)
+        finally:
+            _inflight_dec(request.app)
         cost_ms = (time.perf_counter() - start) * 1000
         response.headers["X-Trace-Id"] = trace_id
         # 指标：请求量按（路径, 状态码）计数 + 耗时直方图（多进程时各实例各一份，由 Prometheus 聚合）
@@ -350,6 +419,12 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
 
     @app.get("/readyz", tags=["ops"], response_model=HealthResponse, summary="就绪检查")
     async def readyz(request: Request):
+        # 停机准备中：**立刻**返回 503，让负载均衡器把流量摘走；
+        # 此时 /healthz 仍是 200 —— 存活探针不能先挂，否则容器会先被 K8s 杀掉，排空就白做了。
+        if getattr(request.app.state, "shutting_down", False):
+            raise HTTPException(status_code=503,
+                                detail=f"服务正在停机准备（reason={request.app.state.shutdown_reason}，"
+                                       f"在途 {request.app.state.inflight}）")
         db = _db(request)
         runtime = _runtime(request)
         kb = runtime.kb(settings.default_vehicle_model)
@@ -491,7 +566,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 METRICS.observe_ttft(first_delta["ms"] / 1000.0)     # SSE 首字延迟直方图
             yield _sse("citations", {"citations": result.citations,
                                      "risk_level": result.risk_level})
-            yield _sse("done", result.model_dump())
+            done_payload = result.model_dump()
+            # 停机中完成的流：明确告诉客户端"这条流是被停机收尾的"，便于它决定是否重连取剩余内容
+            done_payload["shutdown"] = bool(getattr(request.app.state, "shutting_down", False))
+            yield _sse("done", done_payload)
 
         return StreamingResponse(event_gen(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache",
@@ -519,6 +597,32 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             db.add(Feedback(message_id=body.message_id, user_id=principal.user_id,
                             rating=body.rating, comment=body.comment[:1000]))
         return {"ok": True}
+
+    # ── 停机准备（供 K8s preStop / 发布脚本调用）──
+    @app.post("/v1/admin/shutdown/prepare", tags=["ops"], summary="进入停机准备（摘流量+排空）")
+    async def shutdown_prepare(request: Request, body: ShutdownPrepareRequest,
+                               principal: Principal = Depends(principal_of)):
+        """把"要停机了"提前告诉实例：/readyz 转 503、等待在途排空。
+
+        典型用法（K8s）：
+            lifecycle.preStop: curl -X POST /v1/admin/shutdown/prepare -d '{"grace_s":15}'
+        这样 LB 有时间摘流量，进程也有时间排空——**两步都做完才算优雅**。
+        """
+        _require_service(principal)
+        info = prepare_shutdown(request.app, body.reason or "prestop",
+                               body.grace_s or settings.shutdown_grace_s)
+        _audit(request, principal, "shutdown_prepare", f"inflight={info['inflight']}", info)
+        return info
+
+    @app.get("/v1/admin/shutdown/status", tags=["ops"], summary="停机状态与在途请求数")
+    async def shutdown_status(request: Request,
+                              principal: Principal = Depends(principal_of)):
+        _require_service(principal)
+        return {"shutting_down": bool(getattr(request.app.state, "shutting_down", False)),
+                "reason": getattr(request.app.state, "shutdown_reason", ""),
+                "inflight": getattr(request.app.state, "inflight", 0),
+                "deadline_in_s": max(0.0, round(
+                    getattr(request.app.state, "shutdown_deadline", 0.0) - time.time(), 2))}
 
     # ── 知识库版本管理（多版本 / 灰度 / 回滚）──
     @app.get("/v1/admin/kb/versions", tags=["ops"], summary="列出知识库版本")

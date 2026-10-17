@@ -965,5 +965,155 @@ class TestKBVersioning(ServiceTestBase):
         self.assertEqual(resp.status_code, 403, "普通用户不应能注册/切换知识库版本")
 
 
+class TestGracefulShutdown(ServiceTestBase):
+    """BE8 优雅停机：摘流量 → 排空 → 关资源，顺序不能反。
+
+    为什么值得单测：这套机制**本地开发永远测不出来**——只有真实发布/缩容才暴露。
+    所以必须用断言把"顺序"和"计数"钉住，而不是等上线才发现连接被砍。
+    """
+
+    def _service_headers(self) -> dict:
+        return self._auth_headers(self._token("svc", "service", "lynk08"))
+
+    def test_readyz_503_after_prepare_but_healthz_ok(self):
+        """停机准备：/readyz 立刻 503（摘流量），/healthz 仍 200（别让 K8s 先杀）。"""
+        self.assertEqual(self.client.get("/readyz").status_code, 200)
+        resp = self.client.post("/v1/admin/shutdown/prepare",
+                                json={"reason": "deploy", "grace_s": 5},
+                                headers=self._service_headers())
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertTrue(resp.json()["shutting_down"])
+
+        self.assertEqual(self.client.get("/readyz").status_code, 503,
+                         "停机准备期间 /readyz 必须返回 503")
+        self.assertEqual(self.client.get("/healthz").status_code, 200,
+                         "存活探针不能跟着挂，否则容器先被杀、排空白做")
+
+    def test_prepare_requires_service_role(self):
+        """普通用户不能让实例进入停机状态（否则就是一个 DoS 开关）。"""
+        resp = self.client.post("/v1/admin/shutdown/prepare", json={"grace_s": 1},
+                                headers=self.h)
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(self.client.get("/readyz").status_code, 200)
+
+    def test_inflight_returns_to_zero_after_requests(self):
+        """在途计数必须回到 0——只增不减会让排空永远等下去。"""
+        for _ in range(3):
+            self.chat("座椅加热怎么关闭")
+        for _ in range(2):
+            self.client.get("/healthz")
+        self.assertEqual(self.app.state.inflight, 0, "在途计数泄漏了")
+
+    def test_inflight_counts_during_slow_request(self):
+        """请求处理中 inflight 应 > 0（否则排空无从判断）。
+
+        注意：探测必须**轮询**而不是"等一个事件再读一次"——请求放子线程后，
+        主线程要在整个处理窗口内反复采样才能稳定捕捉到 inflight>0
+        （第一版写成事件同步，探测抢跑在 inc 之前，于是稳定失败）。
+        """
+        import threading as _t
+        import time as _time
+
+        self.settings.llm_ms_per_token = 60          # 让离线规划器慢下来，撑开窗口
+        holder = {}
+
+        def fire():
+            holder["resp"] = self.chat("座椅加热怎么关闭")
+
+        worker = _t.Thread(target=fire, daemon=True)
+        worker.start()
+        observed = 0
+        deadline = _time.time() + 10
+        while _time.time() < deadline:
+            observed = max(observed, self.app.state.inflight)
+            if observed > 0:
+                break
+            _time.sleep(0.005)
+        worker.join(20)
+        self.assertGreater(observed, 0,
+                           "处理中的请求没有被计入 inflight，排空将无从判断")
+        self.assertEqual(self.app.state.inflight, 0, "请求结束后计数没有归零")
+
+    def test_drain_waits_then_times_out(self):
+        """drain 的两条路径：归零即返回 True；一直不归零则超时返回 False（不无限等）。"""
+        import threading as _t
+        import time as _time
+
+        from agent.service.app import drain
+
+        app = self.app
+        with app.state.inflight_lock:
+            app.state.inflight = 2
+
+        def release():
+            _time.sleep(0.3)
+            with app.state.inflight_lock:
+                app.state.inflight = 0
+
+        _t.Thread(target=release, daemon=True).start()
+        t0 = _time.perf_counter()
+        self.assertTrue(drain(app, timeout=3.0, poll_s=0.05), "排空应在归零后返回 True")
+        self.assertGreaterEqual(_time.perf_counter() - t0, 0.25, "没有真的等待")
+
+        with app.state.inflight_lock:
+            app.state.inflight = 1
+        t0 = _time.perf_counter()
+        self.assertFalse(drain(app, timeout=0.3, poll_s=0.05), "超时应当返回 False")
+        self.assertLess(_time.perf_counter() - t0, 1.5, "超时后仍在阻塞，停机窗口会被无限拉长")
+        with app.state.inflight_lock:
+            app.state.inflight = 0
+
+    def test_status_endpoint_reports_state(self):
+        body = self.client.get("/v1/admin/shutdown/status",
+                               headers=self._service_headers()).json()
+        self.assertIn("shutting_down", body)
+        # 注意：**本请求自己也在途**，所以这里至少是 1 —— 排空逻辑要等待的正是它自己。
+        self.assertGreaterEqual(body["inflight"], 1)
+        self.assertFalse(body["shutting_down"])
+
+    def test_stream_marks_shutdown_flag(self):
+        """停机期间收尾的流要显式打标，客户端据此决定是否重连取剩余内容。"""
+        self.client.post("/v1/admin/shutdown/prepare", json={"grace_s": 5},
+                         headers=self._service_headers())
+        with self.client.stream("POST", "/v1/chat/stream",
+                                json={"message": "座椅加热怎么关闭"}, headers=self.h) as resp:
+            text = "".join(chunk for chunk in resp.iter_text())
+        self.assertIn('"shutdown": true', text.replace('"shutdown":true', '"shutdown": true'),
+                      "停机期间完成的流没有打 shutdown 标记")
+
+
+
+    def test_lifespan_exit_drains_and_marks_shutdown(self):
+        """退出 lifespan（≈ uvicorn 收到 SIGTERM 后的收尾）必须：置停机位、等在途归零、记指标。
+
+        Windows 上没法给进程发 SIGTERM（Stop-Process 是 TerminateProcess），
+        所以这里直接驱动 lifespan 的 `finally`——**那正是 SIGTERM 触发时执行的同一段代码**。
+        """
+        import tempfile as _tempfile
+
+        from agent.service.app import create_app as _create_app
+        from agent.service.metrics import METRICS as _METRICS
+
+        tmp = _tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        try:
+            settings = make_settings(tmp.name)
+            app = _create_app(settings)
+            with TestClient(app) as client:
+                token = client.post("/v1/auth/token",
+                                    json={"user_id": "u1", "role": "driver",
+                                          "vehicle_model": "lynk08"}).json()["access_token"]
+                client.post("/v1/chat", json={"message": "座椅加热怎么关闭"},
+                            headers={"Authorization": f"Bearer {token}"})
+                self.assertFalse(app.state.shutting_down)
+                self.assertEqual(app.state.inflight, 0)
+            # 退出 with 块 → lifespan finally 已执行
+            self.assertTrue(app.state.shutting_down, "退出 lifespan 后未置停机位")
+            self.assertEqual(app.state.inflight, 0, "退出时仍有在途请求未归零")
+            self.assertIn("agent_shutdown_total", _METRICS.render(),
+                          "停机指标没有记录")
+        finally:
+            tmp.cleanup()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

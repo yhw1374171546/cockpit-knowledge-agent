@@ -57,6 +57,12 @@ services:
       retries: 5
       start_period: 90s
     restart: unless-stopped
+    # ── 优雅停机（BE8）──
+    # stop_grace_period 必须**大于**「应用内 drain 宽限期 + uvicorn graceful timeout」之和，
+    # 否则 docker 会先 SIGKILL，排空还没做完就被杀 —— 那等于没做优雅停机。
+    # 应用内默认 20s（SERVICE_SHUTDOWN_GRACE_S）+ uvicorn 30s → 这里给 40s。
+    stop_grace_period: 40s
+    stop_signal: SIGTERM
 
   # ── 数据库 ──
   postgres:
