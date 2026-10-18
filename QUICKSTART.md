@@ -136,9 +136,14 @@ python -m agent.run_agent                                    # 不传问题：�
 **终端 A —— 起服务**：
 
 ```powershell
-$env:AGENT_KB_PATH = "eval/fixtures/mini_corpus.jsonl"     # 用内置合成语料，启动快
-$env:SERVICE_JWT_SECRET = "dev-secret-change-me"           # 本地开发用；生产必须换
+# 最小命令：不设任何环境变量也能直接起（开发用默认密钥 >=32 字节，不会刷警告）
 python -m uvicorn agent.service.app:app --port 8077
+
+# 想用内置 24 块小语料（启动更快，不加载 9,301 块）：
+$env:AGENT_KB_PATH = "eval/fixtures/mini_corpus.jsonl"
+
+# 生产部署时必须注入真实密钥（32 字节以上）：
+$env:SERVICE_JWT_SECRET = "<从密钥管理服务取>"
 ```
 
 启动成功的标志（日志里能看到）：
@@ -188,8 +193,11 @@ curl.exe -N -X POST http://127.0.0.1:8077/v1/chat/stream `
 http://127.0.0.1:8077/
 ```
 
-**不用登录**——页面会自动向 `/v1/auth/token` 申请 token（默认 `demo / driver / lynk08`）。
-想用版本管理功能，点右上角「设置」把角色改成 `service`。
+**不用登录**——页面会自动向 `/v1/auth/token` 申请 token，默认是 **`demo / service / lynk08`**。
+
+> 为什么默认 `service`：`/v1/admin/kb/versions` 这类版本管理接口**要求 service 角色**，
+> 用 driver 会得到 403（那是设计如此，不是 bug，但开箱看到一片空白容易误会）。
+> 想演示权限隔离，在「设置」里切回 `driver` 即可——版本面板会显示"当前角色无权查看（需 service）"。
 
 页面上有几块，都对应真实接口：
 

@@ -45,7 +45,10 @@ class Settings:
     kv_sqlite_path: str = ""
 
     # 鉴权
-    jwt_secret: str = ""
+    # 开发用占位密钥：**必须 >=32 字节**，否则 PyJWT 每次签发/校验都会刷
+    # InsecureKeyLengthWarning（HMAC-SHA256 的最小推荐长度就是 32 字节）。
+    # 生产一律用 SERVICE_JWT_SECRET 从密钥管理服务注入，不要用这个值。
+    jwt_secret: str = "dev-secret-change-me-0123456789abcdef"
     jwt_algorithm: str = "HS256"
     jwt_ttl_seconds: int = 3600
     auth_required: bool = True
@@ -123,7 +126,8 @@ class Settings:
             kv_backend=os.environ.get("SERVICE_KV_BACKEND", ""),
             redis_url=os.environ.get("SERVICE_REDIS_URL", ""),
             kv_sqlite_path=os.environ.get("SERVICE_KV_SQLITE_PATH", ""),
-            jwt_secret=os.environ.get("SERVICE_JWT_SECRET", "dev-secret-change-me"),
+            jwt_secret=os.environ.get("SERVICE_JWT_SECRET",
+                                  "dev-secret-change-me-0123456789abcdef"),
             jwt_ttl_seconds=_int("SERVICE_JWT_TTL_SECONDS", 3600),
             auth_required=os.environ.get("SERVICE_AUTH_REQUIRED", "1").lower() not in ("0", "false"),
             dev_token_enabled=os.environ.get("SERVICE_DEV_TOKEN", "1").lower() not in ("0", "false"),

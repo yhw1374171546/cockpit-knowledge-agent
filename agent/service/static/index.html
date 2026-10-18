@@ -229,8 +229,8 @@
     <div>
       <label>角色（service / admin 才能用版本管理）</label>
       <select id="f-role">
-        <option value="driver">driver（车主）</option>
-        <option value="service">service（服务顾问）</option>
+        <option value="driver">driver（车主，看不到版本管理）</option>
+        <option value="service" selected>service（服务顾问，默认）</option>
         <option value="admin">admin（管理员）</option>
       </select>
     </div>
@@ -262,7 +262,9 @@
 const S = {
   base: location.origin,
   userId: "demo",
-  role: "driver",
+  // 默认用 service：这样「知识库版本」面板开箱可用（driver 会被 403，看起来像 bug）。
+  // 想演示租户/权限隔离，在「设置」里切回 driver 即可。
+  role: "service",
   model: "lynk08",
   token: "",
   sessionId: null,
