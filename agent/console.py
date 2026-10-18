@@ -40,20 +40,26 @@ def harden_stdout() -> None:
     """按"是否终端"选择编码，并把编不出的字符替换而非抛异常。
 
     - **终端**：保持系统默认编码（中文 Windows 就是 GBK），只是把不可编码字符换成 `?`，
-      这样 `✅` 会显示成 `?` 但**不会崩**；
+      这样 `✅` 会显示成 ASCII 标记但**不会崩**；
     - **重定向/管道**：强制 UTF-8，方便 CI、日志、编辑器与解析脚本统一处理。
+
+    实现上用 `getattr(stream, "reconfigure", None)` 而不是直接调用：
+    `sys.stdout` 的静态类型是 `TextIO`，并不声明 `reconfigure`（那是 `TextIOWrapper` 的方法），
+    直接调用会让 mypy 报 `union-attr`；顺带也能兼容被替换成自定义流的场景。
     """
     for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if not callable(reconfigure):
+            continue
         try:
             is_tty = bool(stream.isatty())
         except Exception:                              # noqa: BLE001
             is_tty = False
         try:
             if is_tty:
-                stream.reconfigure(errors="replace")            # type: ignore[attr-defined]
+                reconfigure(errors="replace")
             else:
-                stream.reconfigure(encoding="utf-8",            # type: ignore[attr-defined]
-                                   errors="replace")
+                reconfigure(encoding="utf-8", errors="replace")
         except Exception:                              # noqa: BLE001
             pass
 
