@@ -201,6 +201,95 @@ class TestBufferUnit(unittest.TestCase):
         self.assertTrue(buf.has("c"))
 
 
+class TestAmendEvent(unittest.TestCase):
+    """流式增量与最终答案不一致时，必须补一个 amend 事件。
+
+    线上抓到的问题：问「车上有冰箱吗」，徽标显示"已限定"，
+    **气泡里却还是那 12V 电源原文**——因为可回答性校验（answerability）在 `_finalize`
+    里改写答案，而流式增量在那之前已经发出去了。安全硬门控追加处置指令、
+    接地失败改拒答，也是同一类问题（"先说了、再改口、但没告诉客户端"）。
+
+    刻意**不继承 SSEBase**：那个基类已经起了一个 app，复用同一临时目录会让两个 app
+    的数据库/生命周期互相干扰（我第一次写这个用例就栽在这里，表现为"只有一个 delta"）。
+    """
+
+    FRIDGE_TEXT = ("车载12V电源通过 12V电源插座，可以给电子设备"
+                   "（例如：音乐播放器、车载冰箱和移动手机）充电。")
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _client_with_fridge(self):
+        import json
+
+        corpus = os.path.join(self._tmp.name, "fridge.jsonl")
+        with open(corpus, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"id": 1, "text": self.FRIDGE_TEXT,
+                                 "source": "train_a.pdf", "page": 128},
+                                ensure_ascii=False) + "\n")
+        # 语料里只有这一块：问"有冰箱吗"必然命中它，从而触发限定回答
+        settings = make_settings(self._tmp.name)
+        settings.kb_path = corpus
+        # 关掉语义缓存：否则第二次请求命中缓存后 delta 直接来自最终答案，amend 永不触发
+        settings.enable_semantic_cache = False
+        return TestClient(create_app(settings))
+
+    def _token(self, client) -> dict:
+        token = client.post("/v1/auth/token",
+                            json={"user_id": "u1", "role": "driver",
+                                  "vehicle_model": "lynk08"}).json()["access_token"]
+        return {"Authorization": f"Bearer {token}"}
+
+    def test_stream_emits_amend_and_done_has_final_answer(self):
+        with self._client_with_fridge() as client:
+            auth = self._token(client)
+            with client.stream("POST", "/v1/chat/stream",
+                               json={"message": "车上有冰箱吗"}, headers=auth) as resp:
+                text = "".join(resp.iter_text())
+
+        events = parse_events(text)
+        names = [e[1] for e in events]
+        self.assertIn("amend", names, f"没有 amend 事件：{names}")
+        self.assertEqual(names[-1], "done")
+        self.assertLess(names.index("amend"), names.index("citations"),
+                        "amend 应在 citations 之前发出")
+
+        amend = next(d for _id, ev, d in events if ev == "amend")
+        self.assertTrue(amend["text"].startswith("手册没有说明"),
+                        f"amend 内容不是限定回答：{amend['text'][:60]}")
+        self.assertEqual(amend["status"], "limited")
+
+        # 已流出的增量确实是**改写前**的原文——这正是需要 amend 的原因
+        deltas = "".join(d.get("text", "") for _id, ev, d in events if ev == "delta")
+        self.assertIn("车载冰箱", deltas, "增量里应包含原文（证明它先于改写）")
+        self.assertNotIn("手册没有说明", deltas, "增量不该已经是限定回答")
+
+        # done.answer 永远是权威值
+        done = events[-1][2]
+        self.assertTrue(done["answer"].startswith("手册没有说明"))
+        self.assertEqual(done["status"], "limited")
+
+    def test_no_amend_when_answer_unchanged(self):
+        """正常问答（答案没被改写）不该多发 amend——避免无意义事件。"""
+        corpus = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__)))), "eval", "fixtures",
+            "mini_corpus.jsonl")
+        settings = make_settings(self._tmp.name)
+        settings.kb_path = corpus
+        settings.enable_semantic_cache = False
+        with TestClient(create_app(settings)) as client:
+            auth = self._token(client)
+            with client.stream("POST", "/v1/chat/stream",
+                               json={"message": "座椅加热怎么关闭"}, headers=auth) as resp:
+                text = "".join(resp.iter_text())
+        names = [e[1] for e in parse_events(text)]
+        self.assertEqual(names[-1], "done")
+        self.assertNotIn("amend", names, f"不该有 amend：{names}")
+
+
 class TestCancelUpstream(unittest.TestCase):
     """断连取消：Agent 必须在下一步之前退出，而不是把 token 烧完。"""
 

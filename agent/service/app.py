@@ -616,11 +616,18 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         buffer: SSEReplayBuffer = request.app.state.sse_buffer
         stream_id = ctx["trace_id"]
 
+        # 已经流出去的文本：和最终答案可能**不一致**——
+        # 可回答性校验（answerability）和安全硬门控都在 `_finalize` 里**改写**答案，
+        # 而流式增量在那之前就发出去了。不比对就会出现"徽标说'已限定'、
+        # 气泡里却还是原文"这种自相矛盾的界面（线上被用户抓出来过）。
+        streamed = {"text": ""}
+
         def on_delta(text: str) -> None:
             if cancel.is_set():
                 return                                  # 已断开：不再往队列里堆
             if first_delta["ms"] is None:
                 first_delta["ms"] = (time.perf_counter() - t0) * 1000
+            streamed["text"] += text
             q.put(("delta", text))
 
         holder: Dict[str, Any] = {}
@@ -709,6 +716,22 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             result.ttft_ms = round(first_delta["ms"], 2) if first_delta["ms"] else result.latency_ms
             if first_delta["ms"]:
                 METRICS.observe_ttft(first_delta["ms"] / 1000.0)     # SSE 首字延迟直方图
+            # ── 答案修正（amend）：流式增量与最终答案不一致时必须明说 ──
+            # 触发场景：
+            #   ① 可回答性校验把"原文摘录"换成"限定回答"（status=limited）；
+            #   ② 安全硬门控在答案后追加处置指令；
+            #   ③ 接地校验失败后改成拒答（此前的增量已经发出去了）。
+            # 客户端收到 amend 应以它为准替换已显示内容；`done.answer` 永远是权威值。
+            streamed_text = streamed["text"].strip()
+            final_text = (result.answer or "").strip()
+            if streamed_text and streamed_text != final_text:
+                METRICS.inc("agent_sse_amend_total", {"status": result.status})
+                logger.info("SSE 答案修正 stream=%s status=%s before=%d after=%d",
+                            stream_id, result.status, len(streamed_text), len(final_text))
+                yield emitted(_sse("amend", {"text": final_text, "status": result.status,
+                                             "reason": result.status,
+                                             "trace_id": ctx["trace_id"]},
+                                    event_id=seq["n"] + 1))
             yield emitted(_sse("citations", {"citations": result.citations,
                                               "risk_level": result.risk_level},
                                 event_id=seq["n"] + 1))

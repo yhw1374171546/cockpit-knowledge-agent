@@ -400,6 +400,7 @@ async function send(text) {
   const t0 = performance.now();
   let firstDelta = null;
   let done = null;
+  let amended = false;      // 服务端是否修正过答案（amend 事件）
 
   try {
     await issueToken();
@@ -456,6 +457,15 @@ async function send(text) {
           box.bubble.textContent = box.text;
           box.bubble.appendChild(box.cursor);
           $("chat").scrollTop = $("chat").scrollHeight;
+        } else if (ev === "amend") {
+          // 服务端改写了答案（可回答性限定 / 安全门控追加 / 拒答）：
+          // 流式增量是**改写前**的内容，必须以 amend 为准替换，
+          // 否则会出现"徽标说已限定、气泡里还是原文"的自相矛盾。
+          box.text = obj.text || "";
+          box.bubble.textContent = box.text;
+          box.bubble.appendChild(box.cursor);
+          amended = true;
+          $("chat").scrollTop = $("chat").scrollHeight;
         } else if (ev === "citations") {
           renderCites(box.cites, obj.citations || [], $("cites-panel"), $("cite-count"));
         } else if (ev === "done") {
@@ -508,7 +518,7 @@ function finishTurn(box, r, totalMs) {
   const statusMap = {
     answered: ["已回答", "ok"], refused: ["拒答（不瞎编）", "warn"],
     // limited：可回答性校验后给出的**限定回答**（手册没说明配备 X，但给了相关原文）
-    limited: ["手册未说明（已限定）", "warn"],
+    limited: ["已限定（手册未说明配备）", "warn"],
     needs_confirmation: ["待确认", "warn"], error: ["出错", "bad"],
     cancelled: ["已取消", "warn"], max_steps: ["步数上限", "warn"],
   };
@@ -524,7 +534,15 @@ function finishTurn(box, r, totalMs) {
   box.meta.innerHTML = "";
   badges.forEach((b) => box.meta.appendChild(b));
 
-  if (r.answer && !box.text) box.bubble.textContent = r.answer;
+  // 兜底：老客户端/老服务端的组合下可能没有 amend 事件，
+  // 这里再比一次——`done.answer` 永远是权威值。
+  const finalText = (r.answer || "").trim();
+  if (finalText && finalText !== (box.text || "").trim()) {
+    box.text = finalText;
+    box.bubble.textContent = finalText;
+    amended = true;
+  }
+  if (amended) box.bubble.title = "内容已按校验结果修正";
   if (r.status === "refused") box.bubble.classList.add("refused");
   if (r.status === "limited") box.bubble.classList.add("limited");
   if (r.degraded) box.bubble.classList.add("degraded");
