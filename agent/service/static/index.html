@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>智能座舱知识大脑 · 多 Agent 助手</title>
+<style>
+  :root {
+    --bg: #0f1216; --panel: #161b22; --panel-2: #1c232c; --border: #2a333d;
+    --text: #e6edf3; --muted: #8b949e; --accent: #4a9eff; --accent-2: #1f6feb;
+    --ok: #3fb950; --warn: #d29922; --danger: #f85149; --cache: #a371f7;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    display: flex; flex-direction: column; height: 100vh;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px; padding: 10px 16px;
+    background: var(--panel); border-bottom: 1px solid var(--border); flex-wrap: wrap;
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; white-space: nowrap; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  .spacer { flex: 1; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px;
+    border-radius: 999px; font-size: 12px; border: 1px solid var(--border);
+    background: var(--panel-2); color: var(--muted); white-space: nowrap;
+  }
+  .pill.ok { color: var(--ok); border-color: #1f3a24; background: #10251a; }
+  .pill.bad { color: var(--danger); border-color: #4a1f1f; background: #2a1414; }
+  .pill.warn { color: var(--warn); border-color: #4a3c1a; background: #2a2412; }
+  .pill.cache { color: var(--cache); border-color: #3a2a52; background: #221a30; }
+  button, select, input {
+    font: inherit; color: var(--text); background: var(--panel-2);
+    border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px;
+  }
+  button { cursor: pointer; transition: .15s; }
+  button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: var(--accent-2); border-color: var(--accent-2); color: #fff; }
+  button.primary:hover:not(:disabled) { background: var(--accent); color: #fff; }
+  main { flex: 1; display: grid; grid-template-columns: 1fr 380px; overflow: hidden; }
+  @media (max-width: 1000px) { main { grid-template-columns: 1fr; } aside { display: none; } }
+
+  /* ── 聊天区 ── */
+  #chat-wrap { display: flex; flex-direction: column; overflow: hidden; }
+  #chat { flex: 1; overflow-y: auto; padding: 18px; display: flex; flex-direction: column; gap: 14px; }
+  .msg { display: flex; flex-direction: column; gap: 6px; max-width: 90%; }
+  .msg.user { align-self: flex-end; align-items: flex-end; }
+  .bubble {
+    padding: 10px 14px; border-radius: var(--radius); white-space: pre-wrap;
+    word-break: break-word; border: 1px solid var(--border); background: var(--panel);
+  }
+  .msg.user .bubble { background: #17324d; border-color: #1f4b73; }
+  .msg.assistant .bubble.refused { border-color: #4a3c1a; background: #241f12; }
+  .msg.assistant .bubble.degraded { border-color: #4a1f1f; background: #251315; }
+  .msg.assistant .bubble .cursor {
+    display: inline-block; width: 7px; height: 15px; background: var(--accent);
+    vertical-align: text-bottom; animation: blink 1s steps(2) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+  .meta-row { display: flex; gap: 6px; flex-wrap: wrap; font-size: 11px; align-items: center; }
+  .cites { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 2px; }
+  .cite {
+    font-size: 11px; padding: 3px 8px; border-radius: 6px; cursor: default;
+    background: #12283d; border: 1px solid #1f4b73; color: #8ec7ff;
+  }
+  .cite b { color: #cfe8ff; }
+  .quick { display: flex; gap: 6px; flex-wrap: wrap; padding: 0 18px 10px; }
+  .quick button { font-size: 12px; padding: 4px 10px; color: var(--muted); }
+  #composer {
+    display: flex; gap: 8px; padding: 12px 18px; border-top: 1px solid var(--border);
+    background: var(--panel);
+  }
+  #composer textarea {
+    flex: 1; resize: none; height: 46px; padding: 12px 14px; border-radius: var(--radius);
+    background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+    font: inherit; outline: none;
+  }
+  #composer textarea:focus { border-color: var(--accent); }
+
+  /* ── 右侧面板 ── */
+  aside {
+    border-left: 1px solid var(--border); background: var(--panel);
+    overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 14px;
+  }
+  .card { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  .card > .hd {
+    padding: 8px 12px; font-size: 12px; font-weight: 600; color: var(--muted);
+    background: var(--panel-2); border-bottom: 1px solid var(--border);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .card > .bd { padding: 10px 12px; font-size: 12px; }
+  .kv { display: grid; grid-template-columns: 92px 1fr; gap: 4px 8px; }
+  .kv .k { color: var(--muted); }
+  .kv .v { word-break: break-all; }
+  .steps { display: flex; flex-direction: column; gap: 5px; }
+  .step { display: flex; gap: 8px; font-size: 12px; align-items: baseline; }
+  .step .n {
+    flex: none; width: 18px; height: 18px; border-radius: 50%; background: var(--panel-2);
+    border: 1px solid var(--border); display: grid; place-items: center; font-size: 10px;
+    color: var(--muted);
+  }
+  .step.ok .n { color: var(--ok); border-color: #1f3a24; }
+  .step.fail .n { color: var(--danger); border-color: #4a1f1f; }
+  .mono { font-family: ui-monospace, Consolas, monospace; font-size: 11px; }
+  .empty { color: var(--muted); font-size: 12px; text-align: center; padding: 18px 0; }
+  .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .row > label { color: var(--muted); font-size: 11px; }
+  input[type=range] { padding: 0; border: none; background: none; flex: 1; }
+  dialog {
+    background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    border-radius: 12px; padding: 0; width: min(560px, 92vw);
+  }
+  dialog::backdrop { background: #000a; }
+  dialog .hd { padding: 12px 16px; border-bottom: 1px solid var(--border); font-weight: 600; }
+  dialog .bd { padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+  dialog .ft { padding: 12px 16px; border-top: 1px solid var(--border); display: flex; gap: 8px; justify-content: flex-end; }
+  dialog label { font-size: 12px; color: var(--muted); display: block; margin-bottom: 4px; }
+  dialog input, dialog select { width: 100%; }
+  .err { color: var(--danger); font-size: 12px; }
+  .toast {
+    position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+    background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+    padding: 9px 16px; border-radius: 999px; font-size: 13px; opacity: 0;
+    pointer-events: none; transition: .2s; z-index: 99;
+  }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🚗 智能座舱知识大脑</h1>
+  <span class="sub">多 Agent 座舱助手 · 可溯源 / 可灰度 / 可观测</span>
+  <span class="spacer"></span>
+  <span class="pill" id="pill-health">检查中…</span>
+  <span class="pill" id="pill-ver">版本 –</span>
+  <span class="pill" id="pill-uptime" title="服务已运行时长">运行 –</span>
+  <button id="btn-settings">设置</button>
+</header>
+
+<main>
+  <section id="chat-wrap">
+    <div id="chat">
+      <div class="empty" id="welcome">
+        先点右上角「设置」填用户信息（或直接用 dev token），然后开始提问。<br>
+        试试下面的快捷问题，注意看<b>引用出处</b>和右侧的<b>追踪面板</b>。
+      </div>
+    </div>
+    <div class="quick" id="quick"></div>
+    <div id="composer">
+      <textarea id="input" placeholder="问点什么…（Enter 发送，Shift+Enter 换行）"></textarea>
+      <button class="primary" id="btn-send">发送</button>
+      <button id="btn-stop" disabled>停止</button>
+    </div>
+  </section>
+
+  <aside>
+    <div class="card">
+      <div class="hd">本次会话 <span class="mono" id="sid">–</span></div>
+      <div class="bd">
+        <div class="kv" id="session-kv">
+          <div class="k">知识库版本</div><div class="v" id="kv-ver">–</div>
+          <div class="k">累计轮次</div><div class="v" id="kv-turns">0</div>
+          <div class="k">累计 token</div><div class="v" id="kv-tokens">0</div>
+          <div class="k">累计成本</div><div class="v" id="kv-cost">$0.000000</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="hd">本轮追踪 <span class="mono" id="trace-id">–</span></div>
+      <div class="bd">
+        <div class="kv">
+          <div class="k">状态</div><div class="v" id="kv-status">–</div>
+          <div class="k">TTFT</div><div class="v" id="kv-ttft">–</div>
+          <div class="k">总延迟</div><div class="v" id="kv-latency">–</div>
+          <div class="k">token</div><div class="v" id="kv-tok2">–</div>
+          <div class="k">成本</div><div class="v" id="kv-cost2">–</div>
+          <div class="k">风险等级</div><div class="v" id="kv-risk">–</div>
+          <div class="k">注入标记</div><div class="v" id="kv-inject">–</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="hd">工具调用</div>
+      <div class="bd"><div class="steps" id="tools"><div class="empty">本轮还没有工具调用</div></div></div>
+    </div>
+
+    <div class="card">
+      <div class="hd">引用出处 <span class="mono" id="cite-count">0</span></div>
+      <div class="bd"><div class="cites" id="cites-panel"><div class="empty">暂无引用</div></div></div>
+    </div>
+
+    <div class="card">
+      <div class="hd">知识库版本（灰度）<button id="btn-kb" style="font-size:11px;padding:2px 8px">刷新</button></div>
+      <div class="bd">
+        <div class="row" style="margin-bottom:8px">
+          <label>灰度比例</label>
+          <input type="range" id="pct" min="0" max="100" value="50" step="10">
+          <span class="mono" id="pct-val">50%</span>
+        </div>
+        <div class="steps" id="kb-list"><div class="empty">需要 service 角色才能查看</div></div>
+        <div class="row" style="margin-top:8px">
+          <button id="btn-rollback" style="font-size:11px">回滚到上一个</button>
+        </div>
+      </div>
+    </div>
+  </aside>
+</main>
+
+<dialog id="dlg-settings">
+  <div class="hd">连接设置</div>
+  <div class="bd">
+    <div>
+      <label>服务地址</label>
+      <input id="f-base" value="">
+    </div>
+    <div>
+      <label>用户 ID</label>
+      <input id="f-user" value="demo" placeholder="demo">
+    </div>
+    <div>
+      <label>角色（service / admin 才能用版本管理）</label>
+      <select id="f-role">
+        <option value="driver">driver（车主）</option>
+        <option value="service">service（服务顾问）</option>
+        <option value="admin">admin（管理员）</option>
+      </select>
+    </div>
+    <div>
+      <label>车型（租户）</label>
+      <select id="f-model">
+        <option value="lynk08">lynk08</option>
+        <option value="lynk09">lynk09</option>
+      </select>
+    </div>
+    <div>
+      <label>或直接填 Access Token（留空则自动申请）</label>
+      <input id="f-token" placeholder="eyJhbGciOi…">
+    </div>
+    <div class="err" id="f-err"></div>
+  </div>
+  <div class="ft">
+    <button id="btn-cancel-settings">取消</button>
+    <button class="primary" id="btn-save-settings">保存并连接</button>
+  </div>
+</dialog>
+
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+
+// ─────────────────────────── 状态 ───────────────────────────
+const S = {
+  base: location.origin,
+  userId: "demo",
+  role: "driver",
+  model: "lynk08",
+  token: "",
+  sessionId: null,
+  traceId: null,
+  turns: 0,
+  tokens: 0,
+  cost: 0,
+  es: null,          // 当前 EventSource / fetch 流的 AbortController
+  abort: null,
+  versions: [],
+};
+
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, txt) => {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (txt !== undefined) n.textContent = txt;
+  return n;
+};
+
+function toast(msg, ms = 2200) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(t._h);
+  t._h = setTimeout(() => t.classList.remove("show"), ms);
+}
+
+// ─────────────────────────── 鉴权 ───────────────────────────
+async function issueToken() {
+  if (S.token) return S.token;
+  const res = await fetch(S.base + "/v1/auth/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user_id: S.userId, role: S.role, vehicle_model: S.model }),
+  });
+  if (!res.ok) throw new Error(`申请 token 失败：${res.status} ${await res.text()}`);
+  const data = await res.json();
+  S.token = data.access_token || data.token;
+  if (!S.token) throw new Error("响应里没有 access_token：" + JSON.stringify(data));
+  return S.token;
+}
+
+function authHeaders(extra) {
+  return Object.assign({ Authorization: "Bearer " + S.token }, extra || {});
+}
+
+// ─────────────────────────── 健康检查 ───────────────────────────
+async function refreshHealth() {
+  // /healthz 是**存活**探针（不查依赖，停机时也要 200）；明细在 /readyz。
+  // 所以这里分两次请求：活着看 healthz，能力看 readyz。
+  const pill = $("pill-health");
+  try {
+    const live = await fetch(S.base + "/healthz");
+    if (!live.ok) throw new Error("healthz " + live.status);
+    const alive = await live.json();
+    const up = Number(alive.uptime_s ?? 0);
+    $("pill-uptime").textContent = up > 3600
+      ? `运行 ${(up / 3600).toFixed(1)}h`
+      : up > 60 ? `运行 ${Math.round(up / 60)}m` : `运行 ${Math.round(up)}s`;
+
+    const ready = await fetch(S.base + "/readyz");
+    const info = await ready.json();
+
+    if (ready.status === 503) {
+      pill.textContent = "停机准备中（已摘流量）";
+      pill.className = "pill warn";
+    } else if (!ready.ok) {
+      pill.textContent = "依赖未就绪";
+      pill.className = "pill warn";
+    } else if (info.status === "degraded") {
+      pill.textContent = `降级 · 数据库不可用 · ${info.kb_chunks ?? "?"} 块`;
+      pill.className = "pill bad";
+    } else {
+      pill.textContent = `就绪 · ${info.kb_chunks ?? "?"} 块 · ${info.kv_backend ?? "?"}/${info.llm_backend ?? "?"}`;
+      pill.className = "pill ok";
+    }
+  } catch (e) {
+    pill.textContent = "服务不可达";
+    pill.className = "pill bad";
+  }
+}
+
+// ─────────────────────────── 渲染一轮对话 ───────────────────────────
+function addUserMsg(text) {
+  const wrap = el("div", "msg user");
+  wrap.appendChild(el("div", "bubble", text));
+  $("chat").appendChild(wrap);
+  $("chat").scrollTop = $("chat").scrollHeight;
+}
+
+function addAssistantMsg() {
+  const wrap = el("div", "msg assistant");
+  const bubble = el("div", "bubble");
+  const cursor = el("span", "cursor");
+  bubble.appendChild(cursor);
+  wrap.appendChild(bubble);
+  const meta = el("div", "meta-row");
+  const cites = el("div", "cites");
+  wrap.appendChild(meta);
+  wrap.appendChild(cites);
+  $("chat").appendChild(wrap);
+  $("chat").scrollTop = $("chat").scrollHeight;
+  return { wrap, bubble, cursor, meta, cites, text: "" };
+}
+
+function badge(text, cls) {
+  const b = el("span", "pill " + (cls || ""), text);
+  b.style.fontSize = "11px";
+  b.style.padding = "2px 7px";
+  return b;
+}
+
+function parseCite(raw) {
+  // 引用形如 "train_a.pdf 第114页"，拆成 文件 / 页码 便于展示
+  const m = String(raw).match(/^(.*?)\s*第\s*(\d+)\s*页\s*$/);
+  return m ? { file: m[1], page: m[2], raw } : { file: String(raw), page: "", raw };
+}
+
+// ─────────────────────────── 发送（SSE 流式）───────────────────────────
+async function send(text) {
+  if (!text.trim()) return;
+  $("welcome")?.remove();
+  addUserMsg(text);
+  const box = addAssistantMsg();
+  $("btn-send").disabled = true;
+  $("btn-stop").disabled = false;
+  S.abort = new AbortController();
+
+  const payload = { message: text };
+  if (S.sessionId) payload.session_id = S.sessionId;
+
+  const t0 = performance.now();
+  let firstDelta = null;
+  let done = null;
+
+  try {
+    await issueToken();
+    const res = await fetch(S.base + "/v1/chat/stream", {
+      method: "POST",
+      // 注意：**不要**复用上一轮的 trace_id。每轮应由服务端分配新 trace_id
+      // （页面只从 meta 事件里读出来展示）；复用会让多轮共用一个 trace，
+      // 追踪面板与断线重连都会错乱。
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(payload),
+      signal: S.abort.signal,
+    });
+
+    if (!res.ok) {
+      const t = await res.text();
+      throw new Error(`HTTP ${res.status}：${t.slice(0, 300)}`);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buf = "";
+
+    while (true) {
+      const { value, done: finished } = await reader.read();
+      if (finished) break;
+      buf += decoder.decode(value, { stream: true });
+
+      // SSE 以空行分隔事件
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) >= 0) {
+        const raw = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        let ev = "", data = "";
+        for (const line of raw.split("\n")) {
+          if (line.startsWith("event:")) ev = line.slice(6).trim();
+          else if (line.startsWith("data:")) data += line.slice(5).trim();
+          else if (line.startsWith("id:")) { /* 事件 id，可用于断线重连 */ }
+        }
+        if (!data) continue;
+        let obj;
+        try { obj = JSON.parse(data); } catch { continue; }
+
+        if (ev === "meta") {
+          S.sessionId = obj.session_id;
+          S.traceId = obj.trace_id;
+          $("sid").textContent = obj.session_id?.slice(0, 12) || "–";
+          $("trace-id").textContent = obj.trace_id?.slice(0, 12) || "–";
+        } else if (ev === "delta") {
+          if (firstDelta === null) {
+            firstDelta = performance.now() - t0;
+            $("kv-ttft").textContent = firstDelta.toFixed(0) + " ms";
+          }
+          box.text += obj.text;
+          box.bubble.textContent = box.text;
+          box.bubble.appendChild(box.cursor);
+          $("chat").scrollTop = $("chat").scrollHeight;
+        } else if (ev === "citations") {
+          renderCites(box.cites, obj.citations || [], $("cites-panel"), $("cite-count"));
+        } else if (ev === "done") {
+          done = obj;
+        } else if (ev === "error") {
+          throw new Error(obj.error || "服务端返回错误");
+        }
+      }
+    }
+  } catch (e) {
+    if (e.name === "AbortError") {
+      box.bubble.textContent = box.text + "（已中止）";
+      box.bubble.classList.add("degraded");
+    } else {
+      box.bubble.textContent = "⚠ " + e.message;
+      box.bubble.classList.add("degraded");
+      toast(e.message);
+    }
+  } finally {
+    box.cursor.remove();
+    $("btn-send").disabled = false;
+    $("btn-stop").disabled = true;
+    S.abort = null;
+  }
+
+  if (done) finishTurn(box, done, performance.now() - t0);
+}
+
+function renderCites(boxCites, list, panel, counter) {
+  boxCites.innerHTML = "";
+  panel.innerHTML = "";
+  counter.textContent = list.length;
+  if (!list.length) {
+    panel.appendChild(el("div", "empty", "本轮没有引用"));
+    return;
+  }
+  for (const raw of list) {
+    const c = parseCite(raw);
+    const chip = el("span", "cite");
+    chip.innerHTML = `<b>${c.file}</b>${c.page ? " · 第 " + c.page + " 页" : ""}`;
+    chip.title = raw;
+    boxCites.appendChild(chip);
+    panel.appendChild(chip.cloneNode(true));
+  }
+}
+
+function finishTurn(box, r, totalMs) {
+  // 状态徽标：answered / refused / needs_confirmation / degraded / cached
+  const badges = [];
+  const statusMap = {
+    answered: ["已回答", "ok"], refused: ["拒答（不瞎编）", "warn"],
+    needs_confirmation: ["待确认", "warn"], error: ["出错", "bad"],
+    cancelled: ["已取消", "warn"], max_steps: ["步数上限", "warn"],
+  };
+  const [stText, stCls] = statusMap[r.status] || [r.status, ""];
+  badges.push(badge(stText, stCls));
+  if (r.cached) badges.push(badge("命中语义缓存", "cache"));
+  if (r.degraded) badges.push(badge("降级 " + (r.degrade_reason || ""), "bad"));
+  if (r.injection_flagged) badges.push(badge("检测到注入", "bad"));
+  if (r.risk_level && r.risk_level !== "low") badges.push(badge("风险 " + r.risk_level, "warn"));
+  if (r.idempotent_replay) badges.push(badge("幂等重放", "warn"));
+  if (r.ttft_ms) badges.push(badge("TTFT " + r.ttft_ms.toFixed(0) + "ms", ""));
+  badges.push(badge("KB " + (r.kb_version || "–"), ""));
+  box.meta.innerHTML = "";
+  badges.forEach((b) => box.meta.appendChild(b));
+
+  if (r.answer && !box.text) box.bubble.textContent = r.answer;
+  if (r.status === "refused") box.bubble.classList.add("refused");
+  if (r.degraded) box.bubble.classList.add("degraded");
+
+  // 右侧追踪面板
+  $("kv-status").textContent = `${r.status}${r.cached ? " · cached" : ""}`;
+  $("kv-ver").textContent = r.kb_version || "–";
+  $("kv-latency").textContent = (r.latency_ms ?? totalMs).toFixed(0) + " ms";
+  $("kv-tok2").textContent = `${r.tokens_in} in / ${r.tokens_out} out`;
+  $("kv-cost2").textContent = "$" + (r.cost_usd ?? 0).toFixed(6);
+  $("kv-risk").textContent = r.risk_level || "–";
+  $("kv-inject").textContent = r.injection_flagged ? "是（已隔离）" : "否";
+
+  const tools = $("tools");
+  tools.innerHTML = "";
+  if (!r.tool_calls || !r.tool_calls.length) {
+    tools.appendChild(el("div", "empty", r.cached ? "命中缓存，未调用工具" : "本轮没有工具调用"));
+  } else {
+    r.tool_calls.forEach((t, i) => {
+      const row = el("div", "step " + (t.ok === false || t.blocked ? "fail" : "ok"));
+      row.appendChild(el("span", "n", String(i + 1)));
+      const body = el("div");
+      body.innerHTML = `<b>${t.tool || "tool"}</b>` +
+        (t.latency_ms !== undefined ? ` <span class="mono">${Number(t.latency_ms).toFixed(0)}ms</span>` : "") +
+        (t.blocked ? ` <span style="color:var(--danger)">已拦截</span>` : "") +
+        (t.repaired ? ` <span class="pill warn" style="font-size:10px;padding:1px 6px">参数已修复</span>` : "") +
+        (t.repeated ? ` <span class="pill warn" style="font-size:10px;padding:1px 6px">重复调用</span>` : "") +
+        (t.reason ? `<div class="err mono">${t.reason}</div>` : "");
+      row.appendChild(body);
+      tools.appendChild(row);
+    });
+  }
+
+  // 会话累计
+  S.turns += 1;
+  S.tokens += (r.tokens_in || 0) + (r.tokens_out || 0);
+  S.cost += r.cost_usd || 0;
+  $("kv-turns").textContent = S.turns;
+  $("kv-tokens").textContent = S.tokens;
+  $("kv-cost").textContent = "$" + S.cost.toFixed(6);
+
+  // 需要确认的写操作 → 弹确认
+  if (r.status === "needs_confirmation" && r.needs_confirmation) {
+    askConfirm(r.needs_confirmation);
+  }
+}
+
+// ─────────────────────────── 写操作确认 ───────────────────────────
+async function askConfirm(actionKey) {
+  const ok = confirm(`这个操作会修改车辆/订单状态：\n\n${actionKey}\n\n确认执行吗？`);
+  if (!ok) { toast("已取消该写操作"); return; }
+  try {
+    const res = await fetch(S.base + "/v1/writes/confirm", {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ action_key: actionKey, session_id: S.sessionId }),
+    });
+    const data = await res.json();
+    toast(data.confirmed ? "已确认执行" : "确认未生效");
+  } catch (e) {
+    toast("确认失败：" + e.message);
+  }
+}
+
+// ─────────────────────────── 知识库版本 ───────────────────────────
+async function refreshKB() {
+  try {
+    await issueToken();
+    const res = await fetch(S.base + "/v1/admin/kb/versions", { headers: authHeaders() });
+    if (!res.ok) {
+      $("kb-list").innerHTML =
+        `<div class="empty">${res.status === 403 ? "当前角色无权查看（需 service）" : "读取失败 " + res.status}</div>`;
+      return;
+    }
+    const data = await res.json();
+    S.versions = data.versions || [];
+    const list = $("kb-list");
+    list.innerHTML = "";
+    if (!S.versions.length) { list.appendChild(el("div", "empty", "还没有版本")); return; }
+    S.versions.forEach((v) => {
+      const active = v.status === "active";
+      const shadow = v.status === "shadow";
+      const row = el("div", "step " + (active ? "ok" : ""));
+      row.appendChild(el("span", "n", active ? "●" : shadow ? "◐" : "○"));
+      const body = el("div");
+      body.innerHTML = `<b class="mono">${v.version}</b>` +
+        ` <span class="mono" style="color:var(--muted)">${v.n_chunks} 块</span>` +
+        (active ? ` <span class="pill ok" style="font-size:10px;padding:1px 6px">生效</span>` : "") +
+        (shadow ? ` <span class="pill warn" style="font-size:10px;padding:1px 6px">灰度 ${v.traffic_pct}%</span>` : "");
+      row.appendChild(body);
+      row.style.cursor = "pointer";
+      row.title = "点击把它设为灰度版本";
+      row.onclick = () => activateVersion(v.version, Number($("pct").value));
+      list.appendChild(row);
+    });
+    const act = S.versions.find((v) => v.status === "active");
+    if (act) {
+      $("pill-ver").textContent = "KB " + act.version;
+      $("kv-ver").textContent = act.version;
+    }
+  } catch (e) {
+    toast("读取版本失败：" + e.message);
+  }
+}
+
+async function activateVersion(version, pct) {
+  try {
+    const res = await fetch(S.base + "/v1/admin/kb/activate", {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ version, vehicle_model: S.model, traffic_pct: pct }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || res.status);
+    toast(pct === 100 ? `已全量切到 ${version}` : `${version} 灰度 ${pct}%`);
+    refreshKB();
+  } catch (e) {
+    toast("切换失败：" + e.message);
+  }
+}
+
+async function rollbackKB() {
+  try {
+    const res = await fetch(S.base + "/v1/admin/kb/rollback", {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ vehicle_model: S.model }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || res.status);
+    toast("已回滚到 " + (data.version || "上一版"));
+    refreshKB();
+  } catch (e) {
+    toast("回滚失败：" + e.message);
+  }
+}
+
+// ─────────────────────────── 设置 ───────────────────────────
+function openSettings() {
+  $("f-base").value = S.base;
+  $("f-user").value = S.userId;
+  $("f-role").value = S.role;
+  $("f-model").value = S.model;
+  $("f-token").value = "";
+  $("f-err").textContent = "";
+  $("dlg-settings").showModal();
+}
+
+async function saveSettings() {
+  const base = $("f-base").value.trim().replace(/\/$/, "");
+  if (base) S.base = base;
+  S.userId = $("f-user").value.trim() || "demo";
+  S.role = $("f-role").value;
+  S.model = $("f-model").value;
+  S.token = $("f-token").value.trim();
+  try {
+    await issueToken();
+    $("dlg-settings").close();
+    toast("已连接：" + S.userId + " / " + S.role);
+    refreshHealth();
+    refreshKB();
+  } catch (e) {
+    $("f-err").textContent = e.message;
+    S.token = "";
+  }
+}
+
+// ─────────────────────────── 启动 ───────────────────────────
+const PRESETS = [
+  "座椅加热怎么关闭",
+  "胎压报警了怎么办",
+  "危险警告灯怎么用",
+  "空调滤芯多久换一次",
+  "帮我预约明天上午的保养",
+  "中国足球的队长是谁",
+];
+
+function initPresets() {
+  const q = $("quick");
+  PRESETS.forEach((p) => {
+    const b = el("button", "", p);
+    b.onclick = () => { $("input").value = p; send(p); $("input").value = ""; };
+    q.appendChild(b);
+  });
+}
+
+function init() {
+  initPresets();
+  $("btn-send").onclick = () => { const v = $("input").value; $("input").value = ""; send(v); };
+  $("input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      const v = $("input").value; $("input").value = ""; send(v);
+    }
+  });
+  $("btn-stop").onclick = () => { S.abort?.abort(); };
+  $("btn-settings").onclick = openSettings;
+  $("btn-cancel-settings").onclick = () => $("dlg-settings").close();
+  $("btn-save-settings").onclick = saveSettings;
+  $("btn-kb").onclick = refreshKB;
+  $("btn-rollback").onclick = rollbackKB;
+  $("pct").oninput = (e) => { $("pct-val").textContent = e.target.value + "%"; };
+
+  refreshHealth();
+  issueToken().then(() => refreshKB()).catch((e) => {
+    toast("自动申请 token 失败，请在「设置」里填写：" + e.message, 5000);
+  });
+
+  setInterval(refreshHealth, 15000);
+}
+
+document.addEventListener("DOMContentLoaded", init);
+</script>
+</body>
+</html>

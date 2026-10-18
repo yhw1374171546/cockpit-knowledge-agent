@@ -36,7 +36,7 @@ from contextlib import asynccontextmanager
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 
 from agent.cache import SemanticCache, cacheable_status
 from agent.graph import AgentConfig, AgentGraph, AgentState
@@ -489,6 +489,20 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                             content={"error": exc.detail, "detail": "",
                                      "trace_id": _trace_id(request)},
                             headers=getattr(exc, "headers", None))
+
+    # ── 演示页（单文件，零构建、零依赖）──
+    # 为什么挂根路径：Agent 的"可溯源""流式""治理可见"这些特性，用 Swagger 或 curl 都看不出来；
+    # 一个能点的页面在演示时价值远大于一堆 JSON。页面本身是纯静态的，不经过鉴权
+    # （它只是一个客户端，token 由页面自己申请并放进 Authorization 头）。
+    @app.get("/", include_in_schema=False)
+    async def index_page():
+        page = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "index.html")
+        if not os.path.isfile(page):
+            return JSONResponse(status_code=404,
+                                content={"error": "演示页缺失",
+                                         "detail": "agent/service/static/index.html 不存在"})
+        return FileResponse(page, media_type="text/html; charset=utf-8",
+                            headers={"Cache-Control": "no-cache"})
 
     # ── 健康检查 ──
     @app.get("/healthz", tags=["ops"], summary="存活检查")
