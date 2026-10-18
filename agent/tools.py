@@ -23,6 +23,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
+from agent.answerability import expand_spec_query
 from agent.kb import Evidence, KnowledgeBase
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -289,7 +290,15 @@ class ToolRegistry:
     # ── 具体工具实现 ──
     def _search_manual(self, query: str, top_k: int = 6) -> ToolResult:
         top_k = max(1, min(int(top_k or 6), 10))
-        hits: List[Evidence] = self.kb.search(query, top_k=top_k)
+        # 数值类问题（"最快能开到多少"）先做查询扩展：手册里写的是"最大设计车速"，
+        # 用户这么说，BM25 是跨不过去的（实测会命中"能量回收…车速"那段）。
+        search_query = expand_spec_query(query)
+        hits: List[Evidence] = self.kb.search(search_query, top_k=top_k)
+        # 注：曾尝试在这里做「数值题证据重排」和「表格行补全」（把同页含数字的块补进证据），
+        # 实测会越权：参数表被切成"表头块 + 数据行块"，补进来的行块与问题关键词重合度低，
+        # 反而把「油耗多少」「续航多远」打成了 refused（回退前它们是 answered）。
+        # 结论：**参数表的结构化解析属于解析层的工作**，不该在检索工具里用启发式硬凑。
+        # 目前的行为是：数值题能召回参数表所在页（表头），数值本身需要后续做表格解析才能稳定拿到。
         if not hits:
             return ToolResult(False, error="知识库中没有检索到相关内容",
                               hint="可以换用手册中的术语重试，例如把口语「靠背发烫」换成「座椅加热」")

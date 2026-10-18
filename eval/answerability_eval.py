@@ -59,9 +59,14 @@ def main() -> int:
     from agent.tools import ToolRegistry
 
     kb = KnowledgeBase.load(KB_FULL)
-    config = AgentConfig()
-    config.enable_answerability = not args.no_answerability
-    agent = AgentGraph(RuleBasedPlannerLLM(), ToolRegistry(kb), config=config)
+
+    def make_agent():
+        """**每题一个全新 agent**：复用同一个实例会让多轮记忆把上一题的话题带进来，
+        于是"空调怎么开"可能被当成上一题的追问，判据也就跟着乱。
+        这是我自己踩过的坑——评测脚本本身也要保证题与题隔离。"""
+        config = AgentConfig()
+        config.enable_answerability = not args.no_answerability
+        return AgentGraph(RuleBasedPlannerLLM(), ToolRegistry(kb), config=config)
 
     print("=" * 78)
     print(f"可回答性评测 · {len(kb.chunks)} 块 · 可回答性校验 "
@@ -74,7 +79,7 @@ def main() -> int:
     over = over_total = 0
 
     for question, expect, note in EXISTENCE_CASES:
-        state = agent.run(question)
+        state = make_agent().run(question)
         status = state.status
         verdict = (state.answerability or {}).get("verdict", "-")
         ok = status == expect

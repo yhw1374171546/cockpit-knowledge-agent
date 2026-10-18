@@ -284,6 +284,46 @@ class TestConfigCorpus(unittest.TestCase):
             self.assertNotIn("手册没有说明", state.answer)
 
 
+class TestSpecQuestion(unittest.TestCase):
+    """数值题（"最快能开到多少"）：判据是"证据里有没有该参数的数值"。
+
+    这条来自用户实测：问「车最快能开到多少」，旧代码把动词短语当实体，
+    回了一句"手册没有明确说明本车支持「开到多少」"——荒唐。
+    """
+
+    HEADER = "技术资料350动力性能车型驱动方式最大设计车速（km/h）最大爬坡度"
+    ROW = "（a）（%）MR6453DCH-EV02两驱20040（a）：车辆以坡底起步。"
+    COMBINED = ("技术资料350动力性能车型 驱动方式最大设计车速（km/h）"
+                "最大爬坡度（a）（%）MR6453DCH-EV02两驱20040")
+
+    def test_page_number_is_not_a_value(self):
+        """回归：页眉里的页码（350）紧挨着单位（km/h），曾被当成参数值。
+
+        第一版没有剥页码，于是「车最快能开到多少」被判成 answerable，
+        但实际上拿到的只是表头，一个数值都没有。
+        """
+        result = check_answerability("车最快能开到多少", [ev(self.HEADER)])
+        self.assertEqual(result.verdict, NEEDS_QUALIFICATION, result.reason)
+
+    def test_unit_before_and_after_number_both_count(self):
+        for text in (self.COMBINED, "最大设计车速 200 km/h"):
+            result = check_answerability("车最快能开到多少", [ev(text)])
+            self.assertEqual(result.verdict, ANSWERABLE, text)
+
+    def test_spec_question_never_extracts_verb_phrase(self):
+        """「开到多少」不能变成实体（否则会冒出"支持「开到多少」"这种句子）。"""
+        qtype, entity, _ = classify_question("车最快能开到多少")
+        self.assertEqual(qtype, "spec")
+        self.assertNotIn("开到", entity)
+        self.assertEqual(entity, "最高车速")
+
+    def test_quantified_question_without_value_is_qualified(self):
+        result = check_answerability("车最快能开到多少", [ev(self.HEADER)])
+        answer = build_qualified_answer(result)
+        self.assertIn("具体数值", answer)
+        self.assertNotIn("支持「", answer)
+
+
 class TestCacheableStatus(unittest.TestCase):
     def test_limited_is_cacheable(self):
         """限定回答是确定性、带出处的结论，缓存它不会把错误固化。"""

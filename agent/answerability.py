@@ -90,6 +90,7 @@ Q_EXISTENCE = "existence"
 Q_CAPABILITY = "capability"
 Q_SCOPE = "scope"
 Q_PREMISE = "premise"
+Q_SPEC = "spec"                      # 多少/多快/几秒 → 查参数值（车主手册常常没有这类参数）
 Q_OPERATIONAL = "operational"        # 怎么用/怎么关 → 不需要存在性判定
 
 # ── 判定结果 ──
@@ -125,6 +126,37 @@ _PREMISE_PATTERNS = (
     r"既然[^，。?？]{0,20}(?:那|为什么)",
 )
 
+# 数值/度量类问句：问的是"多少/多快/多高"，属于**查规格**，不是"有没有"。
+# 真实反例：「车最快能开到多少」被 CAPABILITY 模式抽成实体「开到多少」，
+# 于是回了一句"手册没有明确说明本车支持「开到多少」"——荒唐。
+_SPEC_WORDS = ("多少", "多快", "多高", "多长", "多大", "多重", "多久", "多远",
+               "几档", "几座", "几个", "几条", "几秒", "几升", "几号")
+
+# 数值型问题：问的是"某个参数是多少"。判据是"证据里有没有与该参数匹配的数字+单位"。
+# 真实用例：「车最快能开到多少」——车主手册里**根本没有最高车速这个参数**
+# （它是操作说明，不是参数配置表），所以正确回答是"手册没给这个参数"，
+# 而不是随便抓一句"能量回收的多少取决于车速"。
+_QUANTITY_HINTS = (
+    # (问句里可能出现的词, 该参数的证据单位, 展示名)
+    (("车速", "速度", "最快", "最高车速", "开到", "跑多快"), ("km/h", "公里/小时", "迈"), "最高车速"),
+    (("续航", "能开多远"), ("km", "公里"), "续航里程"),
+    (("油耗", "耗油"), ("L/100km", "升/百公里", "L/100"), "油耗"),
+    (("加速", "百公里加速"), ("秒", "s"), "百公里加速"),
+    (("充电时间", "充满"), ("分钟", "小时"), "充电时间"),
+    (("功率",), ("kW", "千瓦"), "功率"),
+    (("扭矩",), ("N·m", "N.m", "牛米"), "扭矩"),
+    (("轴距", "离地间隙", "车身尺寸"), ("mm", "毫米", "米"), "车身尺寸"),
+    (("胎压",), ("kPa", "bar", "千帕"), "标准胎压"),
+    (("温度",), ("℃", "度"), "温度"),
+    (("保养周期", "多久保养"), ("公里", "km", "月", "年"), "保养周期"),
+)
+
+_DIGIT_RE = re.compile(r"\d+(?:\.\d+)?")
+
+# 实体不该以这些"动作词"开头（说明抽到的是动词短语，不是名词性配置）
+_VERB_PREFIXES = ("开到", "跑到", "达到", "超过", "行驶", "加速", "充电到",
+                  "开到多", "能", "可以", "支持", "跑", "开")
+
 # 问句里要剥掉的口语成分（否则"冰箱啊"会被当成实体）
 _STRIP_TAIL = re.compile(r"[啊呀呢吧哈嘛吗么？?。，,！!\s]+$")
 _STRIP_HEAD = re.compile(r"^(?:本车|这车|车辆|车内|车上|车里|前排|后排)")
@@ -156,6 +188,10 @@ class AnswerabilityResult:
     # 实体是"兜底规则"猜出来的（口语变体）。这类实体不可靠，
     # 所以只允许触发限定回答，**不允许**触发"手册没提到 X"的断言。
     from_fallback: bool = False
+    # 实体是否**可靠到可以断言"手册没提到 X"**。
+    # 只有"存在性/范围"问句、且实体是占有动词的宾语、且不是兜底猜的，才算可靠。
+    # 能力类问句（"能不能 X"）的 X 常是动词短语，拿它去断言"手册没提到 X"很容易出洋相。
+    entity_reliable: bool = False
 
     @property
     def ok(self) -> bool:
@@ -173,6 +209,7 @@ class AnswerabilityResult:
                 "premise_flagged": self.premise_flagged,
                 "scope_mismatch": self.scope_mismatch,
                 "from_fallback": self.from_fallback,
+                "entity_reliable": self.entity_reliable,
                 "hits": [h.to_dict() for h in self.hits[:4]]}
 
 
@@ -214,6 +251,11 @@ def classify_question_ex(question: str) -> Tuple[str, str, bool, bool]:
     for pat in _PREMISE_PATTERNS:
         if re.search(pat, q):
             return Q_PREMISE, "", False, False
+
+    # 数值/度量问句（"最快能开到多少""油耗多少"）→ 走"参数值"判定，不做存在性判定
+    if any(word in q for word in _SPEC_WORDS) and not re.search(r"(有没有|有无|是否有)", q):
+        quantity = _detect_quantity(q)
+        return Q_SPEC, quantity, False, False
 
     wants_all = any(word in q for word in SCOPE_ALL)
 
@@ -273,12 +315,57 @@ def _fallback_existence(q: str, wants_all: bool) -> Optional[Tuple[str, str, boo
     return None
 
 
+def _detect_quantity(q: str) -> str:
+    """从数值型问句里识别"问的是哪个参数"（识别不出就返回空串）。"""
+    for words, _units, label in _QUANTITY_HINTS:
+        if any(word in q for word in words):
+            return label
+    return ""
+
+
+def _evidence_has_value(texts: Sequence[str], quantity: str) -> bool:
+    """证据里是否有与该参数匹配的"数字 + 单位"。
+
+    参数名识别不出来时保守处理：只要证据里有"数字 + 任意单位"，就算答得上来。
+    """
+    units: Tuple[str, ...] = ()
+    for _words, candidates, label in _QUANTITY_HINTS:
+        if label == quantity:
+            units = candidates
+            break
+    for text in texts:
+        # 先剥掉页码类数字：页眉是"技术资料350…（km/h）"这种形式，
+        # 其中 350 是**页码**，紧挨着单位，会被误判成"有数值"。
+        # 这是我自己埋的 bug：第一次跑「车最快能开到多少」直接判成 answered，
+        # 实际拿到的只是表头，一个数值都没有。
+        cleaned = re.sub(r"(?:技术资料|第)\s*\d+\s*页?", " ", text)
+        if not _DIGIT_RE.search(cleaned):
+            continue
+        if not units:
+            return True
+        text = cleaned
+        for unit in units:
+            # 单位要紧挨着数字：**双向 24 字窗口**。
+            # 只往右看是不够的——参数表常写成"最大设计车速（km/h） 200"，单位在数字左边。
+            for m in _DIGIT_RE.finditer(text):
+                window = text[max(0, m.start() - 24): m.end() + 24]
+                if unit in window:
+                    return True
+    return False
+
+
 def _clean_entity(raw: str) -> str:
     text = _STRIP_TAIL.sub("", (raw or "").strip())
     text = _STRIP_HEAD.sub("", text)
     # 去掉动词残留（"支持座椅通风" → "座椅通风" 已被 pattern 吃掉，这里兜底）
     text = re.sub(r"^(?:有|是|带|配|装|设)", "", text)
-    return text.strip()
+    text = text.strip()
+    # 实体不应该是动词短语或带度量词（"开到多少" / "跑多快"）
+    if any(word in text for word in _SPEC_WORDS):
+        return ""
+    if any(text.startswith(prefix) for prefix in _VERB_PREFIXES):
+        return ""
+    return text
 
 
 # ── 谓词判定 ──
@@ -306,12 +393,13 @@ def judge_occurrence(text: str, entity: str, citation: str = "",
     return PredicateHit("neutral", (before[-12:] + entity), citation)
 
 
-def _pick_evidence_sentence(text: str, entity: str) -> str:
-    """从证据里挑出**包含实体**的那一句，供限定回答引用（不要整段丢给用户）。"""
+def _pick_evidence_sentence(text: str, entity: str = "", quantity: str = "") -> str:
+    """从证据里挑出**包含实体（或含数字）**的那一句，供限定回答引用。"""
     # 先按句末标点切，再退回按逗号
+    key = entity or quantity
     for sep in ("。", "；", "\n"):
         for piece in text.split(sep):
-            if entity in piece:
+            if key and key in piece:
                 sentence = piece.strip()
                 if len(sentence) > 8:
                     return sentence if len(sentence) <= 90 else sentence[:88] + "…"
@@ -334,17 +422,39 @@ def check_answerability(question: str, evidence: Sequence[object]) -> Answerabil
     if qtype == Q_OPERATIONAL:
         return AnswerabilityResult(ANSWERABLE, qtype, entity,
                                    reason="非存在性/能力问句，不做可回答性约束")
+    if qtype == Q_SPEC:
+        texts_only = [_text_of(item) for item in evidence]
+        if _evidence_has_value(texts_only, entity):
+            return AnswerabilityResult(ANSWERABLE, qtype, entity,
+                                       reason="证据里有与该参数匹配的数值")
+        snippet, citation = "", ""
+        for item in evidence:
+            text = _text_of(item)
+            if _DIGIT_RE.search(text):
+                snippet, citation = _pick_evidence_sentence(text, quantity=entity), _citation_of(item)
+                break
+        return AnswerabilityResult(NEEDS_QUALIFICATION, qtype, entity,
+                                   reason=f"证据里没有「{entity or '该参数'}」的数值",
+                                   has_related_evidence=bool(snippet),
+                                   evidence_text=snippet, evidence_citation=citation)
+
     if qtype == Q_PREMISE:
         return AnswerabilityResult(NEEDS_QUALIFICATION, qtype, entity,
                                    reason="前提式问句：前提是否成立需更强判定，当前只做标记",
                                    premise_flagged=True)
+
+    # 实体是否可靠取决于"它是不是兜底猜的"，而不是问句类型：
+    # 「支持 CarPlay 吗」的 CarPlay 是可靠的（可以断言"手册没提到"），
+    # 而"开到多少"这种动词短语已经在 _clean_entity 里被丢掉了，走不到这里。
+    entity_reliable = not from_fallback
 
     texts = [(_text_of(item), _citation_of(item)) for item in evidence]
     if not any(entity in text for text, _ in texts):
         return AnswerabilityResult(NOT_ANSWERABLE, qtype, entity,
                                    reason=f"证据中没有提到「{entity}」",
                                    has_related_evidence=False,
-                                   from_fallback=from_fallback)
+                                   from_fallback=from_fallback,
+                                   entity_reliable=entity_reliable)
 
     hits: List[PredicateHit] = []
     evidence_text = ""
@@ -388,7 +498,8 @@ def check_answerability(question: str, evidence: Sequence[object]) -> Answerabil
                                    hits=hits, has_related_evidence=True,
                                    evidence_text=evidence_text,
                                    evidence_citation=evidence_citation,
-                                   from_fallback=from_fallback)
+                                   from_fallback=from_fallback,
+                                   entity_reliable=entity_reliable)
 
     if scope_mismatch:
         reason = f"问句要求「全系/都」，证据只覆盖部分配置（如{'/'.join(w for w in SCOPE_LIMITED if w in ' '.join(t for t, _ in texts)) or '选装'}）"
@@ -420,6 +531,15 @@ def build_qualified_answer(result: AnswerabilityResult) -> str:
     entity = result.entity or "该配置"
     cite = f"（{result.evidence_citation}）" if result.evidence_citation else ""
 
+    if result.question_type == Q_SPEC:
+        head = (f"手册没有给出「{entity}」的具体数值。".replace("「」", "该参数")
+                if entity else "手册没有给出这个参数的具体数值。")
+        if result.evidence_text:
+            cite2 = f"（{result.evidence_citation}）" if result.evidence_citation else ""
+            return (head + f"手册里提到数字的一句是{cite2}：「{result.evidence_text}」，"
+                    "但这不是该参数的规格值。建议查看车辆配置表或咨询经销商。")
+        return head + "车主手册只写操作方法，不含参数表；建议查看车辆配置表或咨询经销商。"
+
     if result.scope_mismatch:
         head = f"手册没有说明「{entity}」是全系标准配置。"
     elif result.question_type == Q_CAPABILITY:
@@ -449,3 +569,53 @@ def build_qualified_answer(result: AnswerabilityResult) -> str:
         return head + body
 
     return head + "建议以车辆配置表或经销商信息为准。"
+
+
+# ── 数值题查询扩展 ──
+#
+# 为什么需要：BM25 对"车最快能开到多少"会命中第 153 页"能量回收的多少取决于…车速"，
+# 而真正的答案在第 350 页的参数表里（"动力性能 最大设计车速（km/h）"）。
+# 用户问法和手册写法差得太远——**手册写"最大设计车速"，用户问"最快能开到多少"**。
+# 所以数值题要在检索前把"手册里的说法"补进查询，而不是指望检索器自己跨过去。
+
+_SPEC_QUERY_EXPANSION = {
+    "最高车速": "最大设计车速 km/h",
+    "续航里程": "续航里程 km 纯电",
+    "油耗": "油耗 L/100km 综合",
+    "百公里加速": "百公里加速 秒",
+    "充电时间": "充电时间 分钟 小时",
+    "功率": "额定功率 kW",
+    "扭矩": "最大扭矩 N·m",
+    "车身尺寸": "尺寸 mm 长宽高 轴距",
+    "标准胎压": "标准胎压 kPa",
+    "温度": "温度 ℃",
+    "保养周期": "保养周期 公里 月",
+}
+
+
+def expand_spec_query(question: str) -> str:
+    """数值类问句 → 补充手册里的术语，便于检索命中参数表。
+
+    非数值问句原样返回（不做任何改动）。
+    """
+    qtype, quantity, _alls, _fb = classify_question_ex(question)
+    if qtype != Q_SPEC:
+        return question
+    extra = _SPEC_QUERY_EXPANSION.get(quantity or "", "")
+    if not extra:
+        return question
+    return f"{question} {extra}"
+
+
+def spec_quantity(question: str) -> str:
+    """数值类问句问的是哪个参数；不是数值问句则返回空串。"""
+    qtype, quantity, _alls, _fb = classify_question_ex(question)
+    return quantity if qtype == Q_SPEC else ""
+
+
+def has_numeric_value(text: str, quantity: str = "") -> bool:
+    """这段文本里是否给出了该参数的"数字 + 单位"。
+
+    参数名未知时只看"有没有数字"，用于数值题的证据重排。
+    """
+    return _evidence_has_value([text], quantity)

@@ -524,9 +524,13 @@ class AgentGraph:
             # 兜底规则猜出来的实体不可靠（"车内安静吗" 会抽出 "安静"），
             # 所以它只允许触发"提到过但不支持"的限定；not_answerable 时不改写答案，
             # 否则会冒出"手册没有说明本车配备「安静」"这种荒唐回复。
+            # not_answerable 时还要看**实体是否可靠**：
+            # 只有"存在性/范围"问句、且实体是占有动词的宾语、且不是兜底猜的，
+            # 才允许断言"手册没提到 X"。能力类问句（"能不能开到多少"）的 X 常是
+            # 动词短语，拿它断言会出洋相（真实反例：回成"手册没有明确说明本车支持「开到多少」"）。
             act = (answerability.needs_qualification
                    or (answerability.verdict == "not_answerable"
-                       and not answerability.from_fallback))
+                       and answerability.entity_reliable))
             if act:
                 qualified = build_qualified_answer(answerability)
                 if qualified and qualified != answer:
