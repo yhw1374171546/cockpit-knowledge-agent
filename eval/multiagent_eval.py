@@ -43,7 +43,14 @@ from agent.obs import Tracer  # noqa: E402
 from agent.orchestrator import Supervisor  # noqa: E402
 from agent.protocols import SAFETY_DIRECTIVES, risk_at_least  # noqa: E402
 from agent.tools import ToolRegistry  # noqa: E402
-from eval.llm_backend import add_llm_args, backend_fields, cost_line, llm_id, llm_label, make_llm  # noqa: E402
+from eval.llm_backend import (  # noqa: E402
+    add_llm_args,
+    backend_fields,
+    cost_line,
+    llm_id,
+    llm_label,
+    make_llm,
+)
 from eval.multiagent_set import TELEMETRY_PROFILES, load_cases  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

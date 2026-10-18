@@ -21,7 +21,13 @@ from fastapi.testclient import TestClient  # noqa: E402
 from agent.service.app import create_app  # noqa: E402
 from agent.service.config import Settings  # noqa: E402
 from agent.service.db import get_database, load_trace  # noqa: E402
-from agent.service.tasks import FAILED, QUEUED, SUCCEEDED, TaskWorker, make_noop_handler  # noqa: E402
+from agent.service.tasks import (  # noqa: E402
+    FAILED,
+    QUEUED,
+    SUCCEEDED,
+    TaskWorker,
+    make_noop_handler,
+)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 FIXTURE = os.path.join(ROOT, "eval", "fixtures", "mini_corpus.jsonl")

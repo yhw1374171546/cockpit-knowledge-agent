@@ -215,6 +215,7 @@ def verify_postgres(port: int, user: str, dbname: str) -> Report:
     # B1 同一套 schema 能否在 PG 上迁移成功
     try:
         from sqlalchemy import create_engine, inspect
+
         from agent.service.db import Base
 
         url = f"postgresql+psycopg://{user}@127.0.0.1:{port}/{dbname}"

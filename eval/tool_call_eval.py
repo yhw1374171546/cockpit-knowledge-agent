@@ -46,7 +46,14 @@ from agent.kb import KnowledgeBase  # noqa: E402
 from agent.llm import RuleBasedPlannerLLM, ToolCall, redact  # noqa: E402
 from agent.obs import Tracer  # noqa: E402
 from agent.tools import ToolRegistry  # noqa: E402
-from eval.llm_backend import add_llm_args, backend_fields, cost_line, llm_id, llm_label, make_llm  # noqa: E402
+from eval.llm_backend import (  # noqa: E402
+    add_llm_args,
+    backend_fields,
+    cost_line,
+    llm_id,
+    llm_label,
+    make_llm,
+)
 from eval.tool_call_set import load_cases  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

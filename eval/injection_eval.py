@@ -50,7 +50,14 @@ from agent.llm import LLMBackend, LLMResponse, ToolCall, redact  # noqa: E402
 from agent.obs import Tracer  # noqa: E402
 from agent.tools import ToolRegistry  # noqa: E402
 from eval.adversarial_set import all_cases  # noqa: E402
-from eval.llm_backend import add_llm_args, backend_fields, cost_line, llm_id, llm_label, make_llm  # noqa: E402
+from eval.llm_backend import (  # noqa: E402
+    add_llm_args,
+    backend_fields,
+    cost_line,
+    llm_id,
+    llm_label,
+    make_llm,
+)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT_JSON = os.path.join(ROOT, "eval", "injection_metrics.json")
