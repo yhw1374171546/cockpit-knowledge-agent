@@ -89,7 +89,10 @@ class RedisKV:
     def __init__(self, url: str) -> None:
         import redis  # type: ignore
 
-        self._client = redis.Redis.from_url(url, decode_responses=True)
+        # 固定 RESP2：本项目只用 GET/SET/INCR/DEL/PIPELINE 这些基础命令，
+        # 不需要 RESP3；而 **Redis 6 以下不支持 HELLO 命令**，redis-py 8 默认发 RESP3
+        # 会让连接直接报 "unknown command `HELLO`"。实测（Redis 5.0.14）踩到过。
+        self._client = redis.Redis.from_url(url, decode_responses=True, protocol=2)
 
     def get(self, key: str) -> Optional[str]:
         # 显式归一化到 str：连接串里带了 decode_responses=True，但一旦有人改掉这个参数，
@@ -105,12 +108,23 @@ class RedisKV:
     def delete(self, key: str) -> None:
         self._client.delete(key)
 
+    # INCRBY + "首次设 TTL" 用 Lua 一次做完。**三个坑都是实测踩出来的**：
+    #   ① 默认事务管道（MULTI/EXEC）在 Redis 5.x 上会抛异常 → 改普通管道；
+    #   ② ``EXPIRE key ttl NX`` 的 NX 是 **Redis 7.0** 才加的语法，Redis 5.x 直接报
+    #      "wrong number of arguments for 'expire'"→ 限流每次 incr 都失败（放行 0）。
+    #   ③ 用两条命令（INCR 再 EXPIRE）会有竞态：INCR 成功后若进程中断，
+    #      这个 key 会**永不过期** → 该用户被永久限流（实测 ttl=-1 复现）。
+    # Lua 脚本在 Redis 服务端原子执行，既兼容 5.x 又没有竞态。
+    _INCR_LUA = """
+    local v = redis.call('INCRBY', KEYS[1], ARGV[1])
+    if tonumber(ARGV[2]) > 0 and v == tonumber(ARGV[1]) then
+        redis.call('EXPIRE', KEYS[1], ARGV[2])
+    end
+    return v
+    """
+
     def incr(self, key: str, amount: int = 1, ttl: Optional[int] = None) -> int:
-        pipe = self._client.pipeline()
-        pipe.incrby(key, amount)
-        if ttl:
-            pipe.expire(key, ttl, nx=True)
-        return int(pipe.execute()[0])
+        return int(self._client.eval(self._INCR_LUA, 1, key, amount, int(ttl or 0)))
 
     def setnx(self, key: str, value: str, ttl: Optional[int] = None) -> bool:
         return bool(self._client.set(key, value, ex=ttl, nx=True))
