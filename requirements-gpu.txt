@@ -1,0 +1,25 @@
+# ── 课程原始链路 / GPU 路径的依赖（只在跑 legacy/ 或真 vLLM 推理时需要）──
+# 主线（agent/ 与 eval/）**不需要**这些：它们要么已用零依赖重写，要么是可降级能力。
+#
+# 什么时候需要：
+#   · 想复现课程原始的四路消融（legacy/run.py）→ 需要 vllm / langchain / text2vec 等
+#   · 想跑真实 m3e 向量嵌入 → 需要 torch + transformers + 模型权重
+#   · 想跑真 vLLM 推理（需要 NVIDIA GPU）→ 需要 vllm
+#
+# ⚠️ 这些包对 Python / CUDA 版本敏感，且体积很大；**如果你只是想跑主线功能，请忽略本文件**。
+
+# 课程原始链路
+# python==3.9.12        # 课程环境；主线支持 3.10+（本项目在 3.12 / 3.13 上验证过）
+vllm
+modelscope
+tiktoken
+PyPDF2
+langchain
+rank_bm25                 # 原始 BM25 用库实现；主线改为自实现，故默认不装
+sentence-transformers
+faiss-gpu                 # 无 GPU 时用 requirements-optional.txt 里的 faiss-cpu
+text2vec==1.2.9
+
+# 真实向量嵌入（m3e 编码器）
+# torch>=2.1
+# transformers>=4.38

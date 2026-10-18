@@ -1,13 +1,22 @@
-python==3.9.12
-vllm
-modelscope
-tiktoken
-pdfplumber
-PdfReader
-PyPDF2
-langchain
-jieba
-rank_bm25
-sentence-transformers
-faiss-gpu
-text2vec==1.2.9
+# ── 核心依赖（CPU 即可跑，无需 GPU）──────────────────────────────
+# 说明：本文件以前是"课程原始链路"的依赖（vllm / faiss-gpu / python==3.9.12），
+# 那条链路已归档到 legacy/，其依赖见 requirements-gpu.txt。
+# 现在的 agent/ 与 eval/ 只需要下面这些。
+
+# 中文分词与检索（BM25 路）
+jieba>=0.42
+
+# PDF 解析（agent/kb.py 的三策略解析）
+pdfplumber>=0.10
+
+# 服务层（FastAPI + SSE）
+fastapi>=0.110
+uvicorn>=0.27
+
+# 数据层与迁移
+sqlalchemy>=2.0
+alembic>=1.13
+
+# 鉴权与 HTTP 客户端
+pyjwt>=2.8
+httpx>=0.27
