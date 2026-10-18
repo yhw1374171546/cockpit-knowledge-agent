@@ -57,8 +57,9 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 # CONFIG：X 是被配置/提供的东西 → 可以回答"有"
 CONFIG_WORDS = (
-    "配备", "标配", "选装", "选配", "设有", "装有", "配有", "置有", "带有",
+    "配备", "标配", "选装", "选配", "设有", "装有", "配有", "置有", "带有", "自带",
     "提供", "具备", "支持", "内含", "内置", "位于", "安装在", "布置在",
+    "配有", "装备", "安装", "含有", "包含",
     "可享受", "可选",
 )
 
@@ -96,11 +97,21 @@ ANSWERABLE = "answerable"
 NEEDS_QUALIFICATION = "needs_qualification"
 NOT_ANSWERABLE = "not_answerable"
 
+# "有没有 X" 的动词表。顺序重要：**长的放前面**，
+# 否则"有没有"会被"有"先吃掉、"自带"会被"带"先吃掉，实体就抽取错了。
+# 这张表是被真实问法打出来的：用户问"车内自带冰箱吗"，第一版没有"自带"，直接漏判。
+_POSSESS_VERBS = (
+    "有没有", "有无", "是否有",
+    "自带", "带有", "带", "配有", "配了", "配备", "配",
+    "装有", "安装了", "安装", "装了", "设有", "含", "含有", "包含",
+    "具备", "有",
+)
+_POSSESS_RE = "(?:" + "|".join(sorted(_POSSESS_VERBS, key=len, reverse=True)) + ")"
+
 # 存在性问句的典型问法（顺序重要：先匹配更具体的）
 _EXISTENCE_PATTERNS = (
-    r"(?:本车|这款车|这车|车辆|车内|车上|车里)?\s*(?:有没有|有无|是否有)\s*(?P<entity>[^吗嘛?？，。]{1,18})",
-    r"(?:本车|这款车|这车|车辆)?\s*(?:有)\s*(?P<entity>[^吗嘛?？，。]{1,18})\s*(?:吗|嘛)",
-    r"(?:是否)?(?:配备|标配|选装|选配|装有|设有|带有)\s*(?P<entity>[^吗嘛?？，。]{1,18})",
+    r"(?:本车|这款车|这车|车辆|车内|车上|车里)?\s*(?:是否)?\s*"
+    + _POSSESS_RE + r"\s*(?P<entity>[^吗嘛么?？，。]{1,18})",
 )
 _CAPABILITY_PATTERNS = (
     r"(?:是否)?(?:支持|可以|能不能|能|能否)\s*(?P<entity>[^吗嘛?？，。]{1,24})",
@@ -142,6 +153,9 @@ class AnswerabilityResult:
     evidence_citation: str = ""
     premise_flagged: bool = False              # 前提式问句：只标记，不改答案
     scope_mismatch: bool = False
+    # 实体是"兜底规则"猜出来的（口语变体）。这类实体不可靠，
+    # 所以只允许触发限定回答，**不允许**触发"手册没提到 X"的断言。
+    from_fallback: bool = False
 
     @property
     def ok(self) -> bool:
@@ -158,6 +172,7 @@ class AnswerabilityResult:
                 "evidence_citation": self.evidence_citation,
                 "premise_flagged": self.premise_flagged,
                 "scope_mismatch": self.scope_mismatch,
+                "from_fallback": self.from_fallback,
                 "hits": [h.to_dict() for h in self.hits[:4]]}
 
 
@@ -181,37 +196,81 @@ def _citation_of(item: object) -> str:
 
 def classify_question(question: str) -> Tuple[str, str, bool]:
     """返回 (问句类型, 目标实体, 是否是范围全域问法)。"""
+    qtype, entity, wants_all, _fallback = classify_question_ex(question)
+    return qtype, entity, wants_all
+
+
+def classify_question_ex(question: str) -> Tuple[str, str, bool, bool]:
+    """同 classify_question，但多返回一个"是否由兜底规则识别"。
+
+    为什么要区分：兜底规则是**猜**出来的实体（"车内安静吗" 会抽出 "安静"），
+    它只够用来做"证据提到过但不支持"的限定，不能拿去断言"手册没提到 X"。
+    """
     q = (question or "").strip()
     if not q:
-        return Q_OPERATIONAL, "", False
+        return Q_OPERATIONAL, "", False, False
 
     # 前提式优先：它问的是"为什么/既然"，不是"有没有"
     for pat in _PREMISE_PATTERNS:
         if re.search(pat, q):
-            return Q_PREMISE, "", False
+            return Q_PREMISE, "", False, False
 
     wants_all = any(word in q for word in SCOPE_ALL)
 
     # 操作类（怎么/如何/步骤）优先排除：这类问题不需要存在性判定
     if re.search(r"(怎么|怎样|如何|步骤|方法|设置|打开|关闭|调节|取消|重置)", q) \
             and not re.search(r"(有没有|有无|是否有|支持|配备)", q):
-        return Q_OPERATIONAL, "", False
+        return Q_OPERATIONAL, "", False, False
 
     for pat in _EXISTENCE_PATTERNS:
         m = re.search(pat, q)
         if m:
             entity = _clean_entity(m.group("entity"))
             if entity:
-                return (Q_SCOPE if wants_all else Q_EXISTENCE), entity, wants_all
+                return (Q_SCOPE if wants_all else Q_EXISTENCE), entity, wants_all, False
 
     for pat in _CAPABILITY_PATTERNS:
         m = re.search(pat, q)
         if m:
             entity = _clean_entity(m.group("entity"))
             if entity:
-                return (Q_SCOPE if wants_all else Q_CAPABILITY), entity, wants_all
+                return (Q_SCOPE if wants_all else Q_CAPABILITY), entity, wants_all, False
 
-    return Q_OPERATIONAL, "", False
+    # 最后兜底：口语变体（"车内自带冰箱吗"这类）
+    fallback = _fallback_existence(q, wants_all)
+    if fallback is not None:
+        qtype, entity, alls = fallback
+        return qtype, entity, alls, True
+
+    return Q_OPERATIONAL, "", False, False
+
+
+# 兜底用：出现这些词说明是"多少/怎么/为什么"类问句，不是"有没有"
+_QUESTION_WORDS = ("多少", "几", "哪", "谁", "何时", "什么时候", "怎么", "怎样",
+                   "如何", "为什么", "多久", "多远", "多久", "能否")
+
+
+def _fallback_existence(q: str, wants_all: bool) -> Optional[Tuple[str, str, bool]]:
+    """兜底识别：以"吗/嘛/么/?"结尾、且不含疑问词的口语问法。
+
+    为什么需要兜底：**模式匹配永远追不上口语变体**。实测「车内自带冰箱吗」
+    「车辆含冰箱吗」「车内带冰箱吗」「车上配了冰箱吗」四种说法全都漏判，
+    而它们和已覆盖的说法语义完全一样。与其不断补正则，不如加一条保守的兜底。
+
+    保守在哪：这条路径标 `from_fallback=1`，只能触发**限定回答**（证据提到过但不支持），
+    **不能触发"手册没提到"的断言**——因为实体是猜出来的（"车内安静吗"会抽出"安静"）。
+    """
+    if not re.search(r"[吗嘛么?？]\s*$", q):
+        return None
+    if any(word in q for word in _QUESTION_WORDS):
+        return None
+    body = _STRIP_TAIL.sub("", q.strip())
+    body = _STRIP_HEAD.sub("", body)
+    body = re.sub(r"^(?:是否)?(?:自带|带有|带|配有|配了|配备|装有|设有|含|包含|具备|有)", "", body)
+    body = _clean_entity(body)
+    if 2 <= len(body) <= 18:
+        return ((Q_SCOPE if wants_all else Q_EXISTENCE), body, wants_all)
+    return None
 
 
 def _clean_entity(raw: str) -> str:
@@ -271,7 +330,7 @@ def check_answerability(question: str, evidence: Sequence[object]) -> Answerabil
     - `needs_qualification`：证据提到了它，但只是**举例/受电/警示**语境 → 必须给限定回答；
     - `not_answerable`：证据里根本没有它 → 交给拒答逻辑（本模块不改这种情况）。
     """
-    qtype, entity, wants_all = classify_question(question)
+    qtype, entity, wants_all, from_fallback = classify_question_ex(question)
     if qtype == Q_OPERATIONAL:
         return AnswerabilityResult(ANSWERABLE, qtype, entity,
                                    reason="非存在性/能力问句，不做可回答性约束")
@@ -284,7 +343,8 @@ def check_answerability(question: str, evidence: Sequence[object]) -> Answerabil
     if not any(entity in text for text, _ in texts):
         return AnswerabilityResult(NOT_ANSWERABLE, qtype, entity,
                                    reason=f"证据中没有提到「{entity}」",
-                                   has_related_evidence=False)
+                                   has_related_evidence=False,
+                                   from_fallback=from_fallback)
 
     hits: List[PredicateHit] = []
     evidence_text = ""
@@ -303,6 +363,19 @@ def check_answerability(question: str, evidence: Sequence[object]) -> Answerabil
     roles = {h.role for h in hits}
     config_hits = [h for h in hits if h.role == "config"]
 
+    # 兜底规则猜出来的实体（口语变体）如果只在证据里被**中性提及**，不做任何判定。
+    # 反例：「车内安静吗」→ 兜底抽出实体「安静」，而手册里恰好有"安静"二字
+    # （比如"营造安静的氛围"）→ 会给出"手册没有说明本车配备「安静」"这种荒唐回复。
+    # 限定的意义在于"证据提到过但语境是举例/受电/警示"，中性提及没有这个语义，
+    # 所以对兜底实体要求**必须命中具体语境**才允许限定。
+    if from_fallback and roles <= {"neutral"}:
+        return AnswerabilityResult(ANSWERABLE, qtype, entity,
+                                   reason="兜底识别的实体仅被中性提及，不做可回答性判定",
+                                   hits=hits, has_related_evidence=True,
+                                   evidence_text=evidence_text,
+                                   evidence_citation=evidence_citation,
+                                   from_fallback=True)
+
     # 范围一致性：问"全系都有吗"、证据却写"选装/高配/部分" → 必须限定
     scope_mismatch = False
     if wants_all:
@@ -314,7 +387,8 @@ def check_answerability(question: str, evidence: Sequence[object]) -> Answerabil
                                    reason=f"证据中有明确配置声明（{config_hits[0].snippet}）",
                                    hits=hits, has_related_evidence=True,
                                    evidence_text=evidence_text,
-                                   evidence_citation=evidence_citation)
+                                   evidence_citation=evidence_citation,
+                                   from_fallback=from_fallback)
 
     if scope_mismatch:
         reason = f"问句要求「全系/都」，证据只覆盖部分配置（如{'/'.join(w for w in SCOPE_LIMITED if w in ' '.join(t for t, _ in texts)) or '选装'}）"
@@ -331,7 +405,8 @@ def check_answerability(question: str, evidence: Sequence[object]) -> Answerabil
                                hits=hits, has_related_evidence=True,
                                evidence_text=evidence_text,
                                evidence_citation=evidence_citation,
-                               scope_mismatch=scope_mismatch)
+                               scope_mismatch=scope_mismatch,
+                               from_fallback=from_fallback)
 
 
 # ── 限定回答模板 ──

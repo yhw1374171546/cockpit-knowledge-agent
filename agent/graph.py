@@ -521,7 +521,13 @@ class AgentGraph:
             #                         属于答非所问，比前者更糟，必须整段替换掉。
             # 注意：`refused` 的语义留给"手册完全没有相关内容"，这里给的是**限定回答**
             # （明确告知"手册没提到/没说明"），比直接拒答更有用。
-            if answerability.needs_qualification or answerability.verdict == "not_answerable":
+            # 兜底规则猜出来的实体不可靠（"车内安静吗" 会抽出 "安静"），
+            # 所以它只允许触发"提到过但不支持"的限定；not_answerable 时不改写答案，
+            # 否则会冒出"手册没有说明本车配备「安静」"这种荒唐回复。
+            act = (answerability.needs_qualification
+                   or (answerability.verdict == "not_answerable"
+                       and not answerability.from_fallback))
+            if act:
                 qualified = build_qualified_answer(answerability)
                 if qualified and qualified != answer:
                     state.trace.append({"node": "qualify_answer",

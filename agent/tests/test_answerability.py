@@ -87,6 +87,49 @@ class TestClassifyQuestion(unittest.TestCase):
         self.assertEqual(qtype, "premise")
 
 
+class TestPhraseVariants(unittest.TestCase):
+    """问法变体：同一语义的口语说法必须都能识别出实体。
+
+    这条来自用户实测——第一版只认 "有/有没有/配备"，
+    问「车内自带冰箱吗」时被判成"操作类"直接放行，于是又答成了那段 12V 电源原文。
+    **模式匹配永远追不上口语变体**，所以这批用例必须一直绿。
+    """
+
+    VARIANTS = {
+        "车内有冰箱吗": "冰箱", "车里有冰箱吗": "冰箱", "车上有没有冰箱": "冰箱",
+        "车内自带冰箱吗": "冰箱", "这车自带冰箱吗": "冰箱", "车上配了冰箱吗": "冰箱",
+        "车内是否配有冰箱": "冰箱", "车辆含冰箱吗": "冰箱", "车内带冰箱吗": "冰箱",
+        "车内有冰箱么": "冰箱", "本车有冰箱吗": "冰箱",
+    }
+
+    def test_phrase_variants_all_recognized(self):
+        for question, entity in self.VARIANTS.items():
+            qtype, found, _ = classify_question(question)
+            self.assertEqual(qtype, "existence", question)
+            self.assertEqual(found, entity, question)
+
+    def test_adjective_question_is_not_forced(self):
+        """兜底识别出的实体只被口头提及（中性语境）时不得触发限定回答。
+
+        反例：「车内安静吗」→ 兜底抽出「安静」，而手册里恰好有"安静"二字，
+        会给出"手册没有说明本车配备「安静」"这种荒唐回复。
+        """
+        result = check_answerability(
+            "车内安静吗", [ev("静音行驶可营造安静的车内氛围。")])
+        self.assertEqual(result.verdict, ANSWERABLE, result.reason)
+        self.assertTrue(result.from_fallback)
+
+    def test_fallback_entity_still_limits_when_context_is_concrete(self):
+        """兜底实体命中"受电/举例"语境时仍要限定（这是兜底的价值）。
+
+        注意用「车载冰箱吗」这种**不含占有动词**的说法才能真正走到兜底分支：
+        「车内自带冰箱吗」已经被主模式（自带）覆盖，测不到兜底。
+        """
+        result = check_answerability("车载冰箱吗", [ev(FRIDGE_EVIDENCE)])
+        self.assertEqual(result.verdict, NEEDS_QUALIFICATION, result.reason)
+        self.assertTrue(result.from_fallback, "这条应走兜底路径")
+
+
 class TestPredicateJudgement(unittest.TestCase):
     def test_consume_role(self):
         hit = judge_occurrence(FRIDGE_EVIDENCE, "冰箱")
