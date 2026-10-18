@@ -50,6 +50,11 @@ warnings.filterwarnings("ignore", category=DeprecationWarning)
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
+
+from agent.console import harden_stdout  # noqa: E402
+
+harden_stdout()   # 中文 Windows 的 GBK 控制台编不出 ✅，否则会崩在最后一行
+
 OUT_JSON = os.path.join(ROOT, "eval", "feedback_metrics.json")
 OUT_MD = os.path.join(ROOT, "eval", "feedback_report.md")
 OUT_BADCASE_MD = os.path.join(ROOT, "eval", "badcase_report.md")

@@ -27,12 +27,24 @@ import time
 import urllib.error
 import urllib.request
 
+# 中文 Windows 的 GBK 控制台编不出 [OK]/[FAIL]，print 会抛 UnicodeEncodeError 崩在最后一行。
+# 本脚本是**独立 HTTP 客户端**（可能在别的机器上跑），所以不依赖 agent 包，直接内联处理：
+# 终端用系统编码 + 替换不可编码字符；重定向/管道统一 UTF-8（方便 CI 解析）。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        if _stream.isatty():
+            _stream.reconfigure(errors="replace")
+        else:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 RESULTS = []
 
 
 def check(name: str, ok: bool, detail: str = "") -> bool:
     RESULTS.append((name, ok, detail))
-    flag = "✅" if ok else "❌"
+    flag = "[OK]" if ok else "[FAIL]"
     print(f"  [{flag}] {name}" + (f"　{detail}" if detail else ""))
     return ok
 
@@ -269,7 +281,7 @@ def main() -> int:
         print("失败项：")
         for name, ok, detail in RESULTS:
             if not ok:
-                print(f"  ❌ {name}　{detail}")
+                print(f"  [FAIL] {name}　{detail}")
     return 0 if passed == total_checks else 1
 
 

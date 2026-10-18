@@ -94,6 +94,7 @@ follow_imports = "silent"
 # 那些报错绝大多数是 `Column[str]` vs `str`，靠 `# type: ignore` 糊过去没有意义。
 files = [
     "agent/cache.py",
+    "agent/console.py",
     "agent/memory.py",
     "agent/protocols.py",
     "agent/reflection.py",

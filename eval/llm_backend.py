@@ -35,6 +35,11 @@ from typing import Any, Dict, Optional, Sequence
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+
+from agent.console import harden_stdout  # noqa: E402
+
+harden_stdout()   # 中文 Windows 的 GBK 控制台编不出 ✅，否则会崩在最后一行
+
 from agent.llm import PROVIDER_PRESETS, RuleBasedPlannerLLM, build_llm, load_dotenv, redact  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

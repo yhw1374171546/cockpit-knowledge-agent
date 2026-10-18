@@ -16,6 +16,11 @@ import sys
 from typing import Any, Dict, List, Tuple
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)          # 让 `from agent...` 可用
+from agent.console import harden_stdout  # noqa: E402
+
+harden_stdout()   # 中文 Windows 的 GBK 控制台编不出 [OK]，否则会崩在最后一行
+
 THRESHOLDS = os.path.join(ROOT, "eval", "thresholds.json")
 
 
@@ -43,19 +48,19 @@ def check_file(rel_path: str, rules: Dict[str, Dict[str, Any]]) -> Tuple[str, Li
     for metric, rule in rules.items():
         value = dig(data, metric)
         if value is None or not isinstance(value, (int, float)):
-            messages.append(f"  ⚠️  {metric}: 缺失或非数值（{value!r}）")
+            messages.append(f"  [!]  {metric}: 缺失或非数值（{value!r}）")
             failed = True
             continue
         low, high = rule.get("min"), rule.get("max")
         if low is not None and value < low:
-            messages.append(f"  ❌ {metric}: {value} < 下限 {low}（{rule.get('desc','')}）")
+            messages.append(f"  [FAIL] {metric}: {value} < 下限 {low}（{rule.get('desc','')}）")
             failed = True
         elif high is not None and value > high:
-            messages.append(f"  ❌ {metric}: {value} > 上限 {high}（{rule.get('desc','')}）")
+            messages.append(f"  [FAIL] {metric}: {value} > 上限 {high}（{rule.get('desc','')}）")
             failed = True
         else:
             bound = f"min={low}" if low is not None else f"max={high}"
-            messages.append(f"  ✅ {metric}: {value}（{bound}）")
+            messages.append(f"  [OK] {metric}: {value}（{bound}）")
     return ("fail" if failed else "pass"), messages
 
 

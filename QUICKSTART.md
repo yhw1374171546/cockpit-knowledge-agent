@@ -14,11 +14,26 @@
 | 语料 | 没准备也能跑 | 仓库自带 **24 块合成语料**，克隆即可跑 |
 | 网络 | 不需要 | 所有测试/冒烟都是离线、零成本 |
 
+### ⚠️ 关于中文乱码：**不要设 `PYTHONIOENCODING`**
+
+这一条我一开始写错了，实测踩坑后改正。Windows 中文控制台的代码页是 **936（GBK）**：
+
+| 你的设置 | Python 输出 | 控制台解码 | 结果 |
+| --- | --- | --- | --- |
+| **什么都不设（推荐）** | GBK | GBK | ✅ 中文正常 |
+| 设 `PYTHONIOENCODING=utf-8`，但**没** `chcp 65001` | UTF-8 | GBK | ❌ 乱码：`鍏ㄩ噺娴嬭瘯` |
+| `chcp 65001` **且** 设 `PYTHONIOENCODING=utf-8` | UTF-8 | UTF-8 | ✅ 正常（要和 CI 完全一致时用） |
+
 ```powershell
-# Windows PowerShell 建议先设这两行，否则中文输出可能乱码
-$env:PYTHONIOENCODING = "utf-8"
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+# 推荐：直接跑，什么环境变量都不用设
+cd 综合项目实战项目一
+python eval/run_all_tests.py
 ```
+
+> 脚本内部已经做了兼容（`agent/console.py::harden_stdout`）：
+> **终端**保持系统编码（中文正常显示）、**重定向/管道**强制 UTF-8（方便 CI 与日志工具解析），
+> 并且把 GBK 编不出的符号（`✅` 这类）替换成 ASCII 标记，避免 `UnicodeEncodeError` 崩在最后一行。
+> 所以你**不需要**为编码做任何配置。
 
 ---
 
@@ -68,7 +83,7 @@ python eval/run_all_tests.py
   test_migrations.py             OK         6 项
 ------------------------------------------------------------
 合计 253 项 ｜ 套件 10/10 通过
-✅ 全部通过
+[OK] 全部通过
 ```
 
 > **第一次跑会多等约 1 秒**：jieba 在构建分词缓存（`Loading model from cache ...`），属正常。
@@ -179,7 +194,7 @@ python eval/cache_bench.py
  冷启动     10 题   9 可答   0 命中   P50  9.12 ms   输出 token 455
  命中缓存   10 题   9 可答   9 命中   P50  6.96 ms   输出 token  94
 缓存命中率（第二轮）：9/10 = 90.0%
-结论： ✅ 缓存已真实生效（命中即跳过检索与大模型调用）
+结论： [OK] 缓存已真实生效（命中即跳过检索与大模型调用）
 ```
 
 > **看 `输出 token` 那一列**：命中时归零——这说明它真的跳过了模型调用，而不只是"查了下缓存"。
@@ -196,7 +211,7 @@ python eval/kb_versioning_demo.py
 [1] 当前生效版本：v1-7e8a811d
 [2] 注册新版本：v2-3e522390 （25 块）→ 注册**不改变**线上路由
 [3] 灰度 50%：分流结果 {"v1-7e8a811d": 12, "v2-3e522390": 8}
-    同一用户连续三问的版本集合：{v1-7e8a811d} → ✅ 稳定（不会在会话中跳版）
+    同一用户连续三问的版本集合：{v1-7e8a811d} → [OK] 稳定（不会在会话中跳版）
 [5] 回滚（一条命令，不需要重启）→ v1-7e8a811d
 ```
 
@@ -220,7 +235,8 @@ python -m alembic current                   # 看当前版本
 
 | 现象 | 原因 | 怎么办 |
 | --- | --- | --- |
-| 输出中文全是乱码 | Windows 控制台默认 GBK | 先执行第 0 节的 `$env:PYTHONIOENCODING="utf-8"` |
+| 输出中文全是乱码（如 `鍏ㄩ噺娴嬭瘯`） | **设了 `PYTHONIOENCODING=utf-8` 但控制台还是 GBK**（代码页 936） | **删掉这个环境变量**：`Remove-Item Env:PYTHONIOENCODING`；或改用 `chcp 65001`（两者必须配对） |
+| `UnicodeEncodeError: 'gbk' codec can't encode character '\u2705'` | GBK 编不出 `✅` 这类符号，`print` 直接抛异常（旧脚本的老问题） | 已通过 `agent/console.py::harden_stdout` 修掉；如仍出现说明脚本没接入，告诉我脚本名 |
 | `ModuleNotFoundError: sqlalchemy` | 没装依赖 | `python -m pip install -r requirements.txt` |
 | `TypeError: zip() takes no keyword arguments` | Python < 3.10 | 升级到 3.10+ |
 | 第一次跑卡 1~2 秒，日志有 `Loading model from cache` | jieba 构建分词缓存 | 正常，只发生一次 |
@@ -283,7 +299,7 @@ python -m alembic current                   # 看当前版本
 复制粘贴跑完，全绿就说明环境没问题：
 
 ```powershell
-$env:PYTHONIOENCODING="utf-8"
+# 不需要设任何编码环境变量（脚本自己处理；见第 0 节）
 python -m pip install -q -r requirements.txt
 python eval/run_all_tests.py           # 253 项全过
 python eval/ci_gate.py                 # 门禁 6/6

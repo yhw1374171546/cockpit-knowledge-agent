@@ -31,6 +31,11 @@ from typing import Any, Dict, List
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+
+from agent.console import harden_stdout  # noqa: E402
+
+harden_stdout()   # 中文 Windows 的 GBK 控制台编不出 ✅，否则会崩在最后一行
+
 from agent.cache import SemanticCache  # noqa: E402
 from agent.graph import AgentConfig, AgentGraph  # noqa: E402
 from agent.kb import KnowledgeBase  # noqa: E402

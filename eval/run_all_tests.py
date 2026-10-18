@@ -18,6 +18,11 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)          # 让 `from agent...` 可用
+from agent.console import harden_stdout  # noqa: E402
+
+harden_stdout()   # 中文 Windows 的 GBK 控制台编不出 [OK]，否则会崩在最后一行
+
 TEST_DIR = os.path.join(ROOT, "agent", "tests")
 
 # 顺序刻意从"最快/最基础"到"最慢/最集成"
@@ -80,7 +85,7 @@ def main() -> int:
     if failed:
         print("失败套件: " + ", ".join(failed))
         return 1
-    print("✅ 全部通过")
+    print("[OK] 全部通过")
     return 0
 
 

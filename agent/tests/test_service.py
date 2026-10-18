@@ -202,8 +202,14 @@ class TestRateLimitAndQuota(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_rate_limit_returns_429_with_retry_after(self):
+        # ⚠️ 这里刻意用**极小的回填速率**（0.01/s）让窗口变长（capacity/refill = 300 秒）。
+        # 原因：限流是**固定窗口**（`window = capacity / refill_per_sec`），原参数
+        # capacity=3 + refill=1.0 得到 3 秒窗口；5 个请求一旦跨过窗口边界，计数会被重置，
+        # 于是 5 个全是 200 → 测试**偶发失败**（3 次里挂 1 次）。
+        # 这不是实现错，是测试有时序依赖。窗口拉长到 300 秒后行为确定。
+        # （固定窗口在边界处允许 2 倍突发，是已知取舍，见 README 的限流小节。）
         settings = make_settings(self._tmp.name, rate_limit_capacity=3,
-                                 rate_limit_refill_per_sec=1.0)
+                                 rate_limit_refill_per_sec=0.01)
         app = create_app(settings)
         with TestClient(app) as client:
             token = client.post("/v1/auth/token",

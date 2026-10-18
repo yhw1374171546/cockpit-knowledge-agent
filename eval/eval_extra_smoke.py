@@ -38,6 +38,11 @@ from typing import Any, Dict, List
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
+
+from agent.console import harden_stdout  # noqa: E402
+
+harden_stdout()   # 中文 Windows 的 GBK 控制台编不出 [OK]，否则会崩在最后一行
+
 from agent.kb import FIXTURE_KB, KnowledgeBase  # noqa: E402
 from agent.llm import RuleBasedPlannerLLM  # noqa: E402
 from agent.reflection import Reflector  # noqa: E402
@@ -73,7 +78,7 @@ def main() -> int:
 
     def record(name: str, ok: bool, detail: str = "") -> bool:
         checks.append({"check": name, "ok": bool(ok), "detail": str(detail)})
-        print(f"  [{'✅' if ok else '❌'}] {name} {detail}", flush=True)
+        print(f"  [{'[OK]' if ok else '[FAIL]'}] {name} {detail}", flush=True)
         return bool(ok)
 
     started = time.perf_counter()
@@ -195,7 +200,7 @@ def main() -> int:
           f"　（{wall:.1f}s，离线零成本）　→ {'通过' if not failed else '未通过'}")
     if failed:
         for item in failed:
-            print(f"  ❌ {item['check']}：{item['detail']}")
+            print(f"  [FAIL] {item['check']}：{item['detail']}")
     print(f"[json] {args.json_out}")
     return 1 if failed else 0
 

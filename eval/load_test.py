@@ -41,6 +41,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+
+from agent.console import harden_stdout  # noqa: E402
+
+harden_stdout()   # 中文 Windows 的 GBK 控制台编不出 ✅，否则会崩在最后一行
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 QUESTIONS = ["座椅加热怎么关闭", "怎么打开危险警告灯", "胎压报警了怎么办"]
 

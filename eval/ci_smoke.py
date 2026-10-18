@@ -24,6 +24,11 @@ from typing import Any, Dict, List
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+
+from agent.console import harden_stdout  # noqa: E402
+
+harden_stdout()   # 中文 Windows 的 GBK 控制台编不出 [OK]，否则会崩在最后一行
+
 from agent.cache import SemanticCache  # noqa: E402
 from agent.graph import AgentConfig, AgentGraph  # noqa: E402
 from agent.guardrails import InjectionDetector, PolicyContext  # noqa: E402
@@ -49,7 +54,7 @@ def main() -> int:
 
     def record(name: str, ok: bool, detail: str = "") -> bool:
         checks.append({"check": name, "ok": ok, "detail": detail})
-        print(f"  [{'✅' if ok else '❌'}] {name} {detail}")
+        print(f"  [{'[OK]' if ok else '[FAIL]'}] {name} {detail}")
         return ok
 
     print("[1] 迷你语料可用性")
