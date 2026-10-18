@@ -56,6 +56,7 @@
   }
   .msg.user .bubble { background: #17324d; border-color: #1f4b73; }
   .msg.assistant .bubble.refused { border-color: #4a3c1a; background: #241f12; }
+  .msg.assistant .bubble.limited { border-color: #4a3c1a; background: #221d10; }
   .msg.assistant .bubble.degraded { border-color: #4a1f1f; background: #251315; }
   .msg.assistant .bubble .cursor {
     display: inline-block; width: 7px; height: 15px; background: var(--accent);
@@ -504,6 +505,8 @@ function finishTurn(box, r, totalMs) {
   const badges = [];
   const statusMap = {
     answered: ["已回答", "ok"], refused: ["拒答（不瞎编）", "warn"],
+    // limited：可回答性校验后给出的**限定回答**（手册没说明配备 X，但给了相关原文）
+    limited: ["手册未说明（已限定）", "warn"],
     needs_confirmation: ["待确认", "warn"], error: ["出错", "bad"],
     cancelled: ["已取消", "warn"], max_steps: ["步数上限", "warn"],
   };
@@ -521,6 +524,7 @@ function finishTurn(box, r, totalMs) {
 
   if (r.answer && !box.text) box.bubble.textContent = r.answer;
   if (r.status === "refused") box.bubble.classList.add("refused");
+  if (r.status === "limited") box.bubble.classList.add("limited");
   if (r.degraded) box.bubble.classList.add("degraded");
 
   // 右侧追踪面板

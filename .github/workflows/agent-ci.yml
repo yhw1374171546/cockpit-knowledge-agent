@@ -98,6 +98,9 @@ jobs:
       - name: Background tasks and trace replay (BE3 + BE4)
         run: python agent/tests/test_tasks_and_traces.py
 
+      - name: Answerability (证据是否回答了问题：接地之外的另一层校验)
+        run: python agent/tests/test_answerability.py
+
       - name: SSE reconnect / cancellation (BE7)
         run: python agent/tests/test_sse.py
 

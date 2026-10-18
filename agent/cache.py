@@ -393,12 +393,17 @@ class SemanticCache:
 # 步数耗尽（max_steps）都不缓存——把它们缓存起来等于把一次失败固化成长期答案。
 # 同理，降级产物（degraded）也**不能**缓存：那是故障期间的兜底内容，
 # 缓存它会把一次故障的影响延长到 TTL 结束。
-CACHEABLE_STATUS = "answered"
+#
+# `limited`（可回答性校验后的**限定回答**，如"手册没说明本车配备冰箱 + 相关原文"）
+# 可以缓存：它是**确定性的、带出处的、由知识库内容决定的**结论，
+# 和 answered 一样稳定；缓存它能省下重复调用，且不会把错误固化（它本身就是谨慎表述）。
+CACHEABLE_STATUSES = ("answered", "limited")
+CACHEABLE_STATUS = CACHEABLE_STATUSES[0]        # 兼容旧名字
 
 
 def cacheable_status(status: str) -> bool:
     """状态是否允许进缓存。"""
-    return (status or "").strip() == CACHEABLE_STATUS
+    return (status or "").strip() in CACHEABLE_STATUSES
 
 
 WHITELIST_CACHEABLE_INTENTS = ("manual_qa", "spec", "status", "maintenance")

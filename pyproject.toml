@@ -93,6 +93,7 @@ follow_imports = "silent"
 # 其余模块待 SQLAlchemy 迁移到 `Mapped[T]` 声明式类型后再逐步纳入——
 # 那些报错绝大多数是 `Column[str]` vs `str`，靠 `# type: ignore` 糊过去没有意义。
 files = [
+    "agent/answerability.py",
     "agent/cache.py",
     "agent/console.py",
     "agent/memory.py",

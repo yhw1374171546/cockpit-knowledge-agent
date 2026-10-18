@@ -22,6 +22,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
+from agent.answerability import build_qualified_answer, check_answerability
 from agent.executor import ToolExecutor
 from agent.guardrails.budget import BudgetTracker
 from agent.guardrails.injection import BLOCKING_FAMILIES, InjectionDetector, isolate_evidence
@@ -65,6 +66,10 @@ class AgentConfig:
     # 生成前的硬门控：问题实词被最佳证据覆盖的比例低于阈值 → 直接拒答（可标定）
     evidence_gate: bool = True
     evidence_overlap_threshold: float = 0.45
+    # 可回答性校验（answerability）：接地只保证"忠于证据"，不保证"回答了问题"。
+    # 典型：问"车内有冰箱吗"，证据只说"12V 电源可以给车载冰箱充电"——忠于原文但没回答问题。
+    # 开启后这类问题会得到**限定回答**（手册未说明配备 + 给相关原文），而不是直接甩一段原文。
+    enable_answerability: bool = True
     # 服务层可注入 Idempotency-Key：写操作策略据此强制要求幂等键
     idempotency_key: str = ""
     # 协作式取消（BE7）：客户端断开后置位，Agent 在**每一步之前**检查并提前退出。
@@ -98,6 +103,8 @@ class AgentState:
     injection_flagged: bool = False
     risk_level: str = "ok"           # ok | notice | warning | critical（安全硬门控判定）
     safety_injected: bool = False    # 是否由硬门控强制注入了安全处置指令
+    # 可回答性判定详情（verdict / question_type / entity / reason / hits）
+    answerability: Dict[str, Any] = field(default_factory=dict)
     policy_blocks: List[Dict[str, Any]] = field(default_factory=list)
     trace: List[Dict[str, Any]] = field(default_factory=list)
     latency_ms: Dict[str, float] = field(default_factory=dict)
@@ -119,6 +126,7 @@ class AgentState:
             "injection_risk": self.injection_risk, "injection_flagged": self.injection_flagged,
             "policy_blocks": self.policy_blocks,
             "reflection": self.reflection, "latency_ms": self.latency_ms, "trace": self.trace,
+            "answerability": self.answerability,
         }
 
 
@@ -489,11 +497,53 @@ class AgentGraph:
                 state.latency_ms["total"] = (time.perf_counter() - start) * 1000
                 return state
 
+        # ── 可回答性校验（answerability）──
+        # 位置刻意放在"接地校验之后"：接地通过只说明答案忠于证据，
+        # 还要再问一句"这条证据是否回答了问题"。放在接地之后是为了不干扰拒答语义
+        # （没证据时仍走上面的 ungrounded → refused 路径）。
+        if (self.config.enable_answerability and state.evidence
+                and state.status not in ("cancelled", "max_steps")
+                and (answer or "").strip() not in ("", NO_ANSWER)):
+            answerability = check_answerability(state.resolved_question, state.evidence)
+            state.answerability = answerability.to_dict()
+            if answerability.verdict in ("not_answerable", "needs_qualification"):
+                state.trace.append({
+                    "node": "answerability",
+                    "verdict": answerability.verdict,
+                    "question_type": answerability.question_type,
+                    "entity": answerability.entity,
+                    "reason": answerability.reason,
+                    "roles": [h.role for h in answerability.hits[:3]],
+                })
+            # 两种情况都要处置，但原因不同：
+            #   needs_qualification → 证据"提到了它"，但只是举例/受电/警示/选装语境；
+            #   not_answerable      → 证据里**根本没提到它**，此时原答案（来自无关证据）
+            #                         属于答非所问，比前者更糟，必须整段替换掉。
+            # 注意：`refused` 的语义留给"手册完全没有相关内容"，这里给的是**限定回答**
+            # （明确告知"手册没提到/没说明"），比直接拒答更有用。
+            if answerability.needs_qualification or answerability.verdict == "not_answerable":
+                qualified = build_qualified_answer(answerability)
+                if qualified and qualified != answer:
+                    state.trace.append({"node": "qualify_answer",
+                                        "before_len": len(answer or ""),
+                                        "after_len": len(qualified)})
+                    answer = qualified
+                    state.status = "limited"
+                    # 限定回答必须带出处：把被引用的那一条提到最前面，
+                    # 否则用户看到"手册里相关的一句"却找不到页码。
+                    if answerability.evidence_citation:
+                        first = answerability.evidence_citation
+                        ordered = [e for e in state.evidence
+                                   if e.get("citation") == first]
+                        ordered += [e for e in state.evidence
+                                    if e.get("citation") != first]
+                        state.evidence = ordered
+
         # 终态保护：cancelled / max_steps 这类"提前结束"的状态不能被改写成 refused/answered，
         # 否则调用方（比如 SSE 端点）无法区分"正常拒答"和"被取消"。
         # 这是被 test_pre_cancelled_agent_exits_immediately 抓出来的：
         # 取消后 status 变成 'refused'，看起来像是一次正常的拒答。
-        if state.status in ("cancelled", "max_steps"):
+        if state.status in ("cancelled", "max_steps", "limited"):
             pass
         elif not state.evidence and answer == NO_ANSWER:
             state.status = "refused"
