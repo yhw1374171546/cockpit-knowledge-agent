@@ -34,6 +34,7 @@
 | 首字延迟 TTFT（P50） | **614 ms → 14 ms** | 流式输出；**已接进服务链路**的语义缓存命中时归零 |
 | 知识库规模 | **9,301 块 / 579 万字** | 页码元数据覆盖 **100%** |
 | **服务化** | **FastAPI + SSE + 幂等落库** | 鉴权/租户/限流/配额/审计；真实 HTTP 冒烟 **36/36** |
+| **工具接入** | **MCP Server（stdio）** | 5 个工具 + 客户端白名单 / 跨进程确认 / trace 透传；`eval/mcp_smoke.py` **7/7** |
 | 测试 | **139 passed** | 5 套测试（含 29 项服务接口测试），完整/迷你语料双模式 |
 
 ---
@@ -283,6 +284,11 @@ python agent/tests/test_service.py     # → Ran 29 tests, OK（服务层接口�
 │   │   └── output_guard.py       #     输出侧泄露拦截
 │   ├── obs/tracer.py             #   ★ trace/span + 成本核算 + 失败归因
 │   ├── cache.py                  #   ★ 语义缓存（车况指纹隔离 + 反义守卫）
+│   ├── mcp/                      #   ★ MCP 工具接入（手写 JSON-RPC over stdio，零依赖）
+│   │   ├── protocol.py           #     JSON-RPC 2.0 编解码 + 错误码
+│   │   ├── server.py             #     MCP Server（5 个工具 + 控制面 + 知识库延迟加载）
+│   │   ├── client.py             #     MCP 客户端（子进程 + 读线程 + 真超时）
+│   │   └── registry.py           #     远端工具 → 与 ToolRegistry 同形的注册表
 │   ├── service/                  #   ★ 服务层（FastAPI + SSE + 幂等落库）
 │   │   ├── config.py             #     环境变量配置（DB/KV/JWT/限流/配额/LLM 后端）
 │   │   ├── db.py                 #     数据模型（会话/消息/工具调用/幂等/配额/审计/反馈）
@@ -1189,7 +1195,55 @@ python eval/kb_versioning_demo.py        # 一条命令演示完整流程
    前提式问句（"为什么胎压报警后可以继续高速行驶"）当前只做 `premise_flagged` 标记，
    **不改答案**——因为"前提是否成立"需要更强的判定，我不假装解决它。
 
-## 二十、致谢与说明
+## 二十、MCP 工具接入：把工具搬到另一个进程
+
+> 代码 `agent/mcp/`（协议 / 服务端 / 客户端 / 注册表）｜测试 `agent/tests/test_mcp.py`（23 项）
+> ｜演示 `python eval/mcp_smoke.py`（7/7，不需要 GPU、不需要真模型）
+
+**为什么做**：前面十九节的工具是**进程内函数**——换个 Agent、换个团队、换门语言就用不了。
+MCP（Model Context Protocol）解决的正是"工具怎么标准化接进来"这一层，所以拿它做接入改造，
+而不是继续往 `tools.py` 里堆函数。
+
+**怎么做**（手写 JSON-RPC over stdio，不装 SDK——保持"克隆即跑"）
+
+| 模块 | 职责 | 关键设计 |
+| --- | --- | --- |
+| `protocol.py` | JSON-RPC 2.0 编解码 + 错误码 | 按行分帧；坏 JSON 回 `-32700` 而不是把服务端打挂 |
+| `server.py` | 暴露 5 个座舱工具 | `tools/list` 的 `inputSchema` **直接复用** `ToolSpec.to_openai_schema()`；知识库**延迟加载** |
+| `client.py` | 拉起子进程 + 按协议收发 | 读线程 + 队列做**真超时**（Windows 没有管道 `select`）；迟到响应按 id 丢弃 |
+| `registry.py` | 远端工具 → 与 `ToolRegistry` **同形** | `subset()` 白名单、`confirm()` 双写、`telemetry` 懒取 |
+
+**同形**是这一节的核心：编排层只认 `names() / specs() / call() / subset() / confirm() / telemetry`，
+所以"工具在本地函数里"和"工具在另一个进程里"对 `AgentGraph` 完全透明。
+`test_agent_graph_runs_over_mcp` 与 `test_supervisor_runs_two_experts_on_one_server`
+证明的是**接入层替换**，不是"给工具加了个壳"。
+
+### 20.1 跨进程之后才出现的三个真问题
+
+1. **白名单只能在客户端做**。服务端不知道调用方是哪个子 Agent，所以 `subset()` 过滤的是客户端
+   的 `specs()`；服务端仍会接受任何已知工具名。测试断言的是"被拦住时**服务端请求数没变**"
+   （`before == client.request_count`），而不是"服务端返回了拒绝"——后者会让你误以为权限在服务端。
+   跨团队共享时应改成服务端 scope token，这条边界写在 `registry.py` 的模块注释里。
+2. **写操作确认变成两步**。未确认 → 返回 `action_key`；客户端调控制面工具 `confirm_action`；
+   服务端放行后才真正执行。本地同时写一份镜像，因为 `ToolExecutor._is_confirmed()` 读的是本地集合：
+   **以服务端为准，镜像只做前置判断**。控制面工具**不出现在 `tools/list`** 里，
+   否则模型能自己确认自己的写操作，"人工二次确认"就形同虚设。
+3. **可观测性会断链**。`trace_id` 跟 `_meta` 透传，`server_ms`（handler 用时）与 `client_ms`
+   （端到端）分开记——否则"工具变慢了"分不清是网络还是检索。
+
+### 20.2 刻意做的取舍
+
+- **握手不等知识库**：完整语料 `KnowledgeBase.load` ≈ 14.6 s，如果握手时加载，客户端会以为服务端挂了。
+  现在 `initialize` / `tools/list` 只读 schema，**第一次真正检索**才付加载成本（`_LazyKnowledgeBase`）。
+- **结果双通道**：`content[].text` 给模型看（与 `ToolResult.to_observation()` 一致），
+  `structuredContent` 给客户端解析，避免客户端再解析一遍 JSON 文本。
+- **超时不杀进程**：一次超时只丢那一个响应，后续调用照常（有测试覆盖）。
+
+**边界（不夸大）**：只实现 tools 能力，没有 resources / prompts / sampling；传输只有 stdio，
+没有 streamable HTTP 与连接池；车况与保养数据仍是内置演示数据，**真实车控 API 没有接**——
+所以这节能证明的是**协议与治理**，不是"打通了车云"。
+
+## 二十一、致谢与说明
 
 - 语料版权归领克汽车销售有限公司所有，本项目仅用于**技术学习与研究**，仓库不含语料。
 - `legacy/qwen_generation_utils.py` 来自 Qwen 官方开源仓库；`pre_train_model/` 下模型权重来自 ModelScope / HuggingFace 开源发布。

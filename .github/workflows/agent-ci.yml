@@ -74,6 +74,11 @@ jobs:
           python agent/tests/test_fc_pipeline.py
           python agent/tests/test_multiagent.py
 
+      - name: MCP tool layer (跨进程：协议 / 白名单 / 确认 / trace / 编排层)
+        env:
+          AGENT_KB_PATH: eval/fixtures/mini_corpus.jsonl
+        run: python agent/tests/test_mcp.py
+
       - name: Extra eval smoke (multi-turn / colloquial / edge / citation)
         run: python eval/eval_extra_smoke.py
 

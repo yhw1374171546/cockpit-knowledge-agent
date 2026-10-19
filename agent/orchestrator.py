@@ -68,20 +68,24 @@ KIND_TO_AGENT = {
 
 
 class Supervisor:
-    def __init__(self, kb, llm: Optional[LLMBackend] = None,
+    def __init__(self, kb=None, llm: Optional[LLMBackend] = None,
                  config: Optional[AgentConfig] = None,
                  tracer: Optional[Tracer] = None,
                  policy: Optional[PolicyEngine] = None,
                  telemetry: Optional[Dict] = None,
                  budget: Optional[Budget] = None,
-                 parallel: bool = True):
+                 parallel: bool = True,
+                 registry: Optional[ToolRegistry] = None):
         self.kb = kb
         self.tracer = tracer or Tracer()
         self.policy = policy or PolicyEngine()
         self.config = config or AgentConfig()
         self.parallel = parallel
         self.budget = budget or Budget(label="supervisor")
-        self.registry = ToolRegistry(kb, telemetry=telemetry)
+        # 工具提供者可以注入：默认自建本地注册表；传入 MCP 代理时，
+        # 三个专家子 Agent 共享同一个远端 server（`subset()` 在客户端做白名单），
+        # 编排层代码一行都不用改——这是"接入口替换"而不是"重写业务"的证据。
+        self.registry = registry or ToolRegistry(kb, telemetry=telemetry)
         self.critic = SafetyCritic(Reflector(evidence_overlap_threshold=self.config.evidence_overlap_threshold))
         # 单 Agent 基线：挂全部工具，用于对比（同一个 LLM 后端）
         self.baseline = AgentGraph(llm or RuleBasedPlannerLLM(), self.registry,
