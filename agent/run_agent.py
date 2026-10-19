@@ -25,8 +25,9 @@ import time
 
 from agent.graph import AgentConfig, AgentGraph, build_langgraph_app
 from agent.llm import OpenAICompatibleLLM, RuleBasedPlannerLLM
-from agent.longterm import LongTermMemory
+from agent.longterm import LongTermMemory, defaults_from_preferences, order_event_recorder
 from agent.memory import ConversationMemory, VehicleProfile
+from agent.orders import OrderStore
 from agent.reflection import Reflector
 from agent.tools import build_default_registry
 
@@ -41,11 +42,22 @@ DEMO_QUESTIONS = [
 
 
 def build_agent(args) -> AgentGraph:
-    registry = build_default_registry(args.kb)
+    store = getattr(args, "longterm_store", None)
+    orders_path = getattr(args, "orders_path", ":memory:")
+    first_question = (args.question[0] if getattr(args, "question", None) else "")
+    registry = build_default_registry(
+        args.kb,
+        orders=OrderStore(orders_path),
+        user_id=getattr(args, "user", "cli"),
+        defaults=defaults_from_preferences(store, getattr(args, "user", "cli")),
+        on_event=order_event_recorder(store, getattr(args, "user", "cli"), "cli", first_question),
+    )
     if getattr(args, "telemetry", "normal") != "normal":
         # 演示用：切到「严重故障 / 电池过热」车况，触发安全评审介入
         from agent.tools import TELEMETRY_PROFILES, ToolRegistry
-        registry = ToolRegistry(registry.kb, telemetry=TELEMETRY_PROFILES[args.telemetry])
+        registry = ToolRegistry(registry.kb, telemetry=TELEMETRY_PROFILES[args.telemetry],
+                                orders=registry.orders, user_id=registry.user_id,
+                                defaults=registry.defaults, on_event=registry.on_event)
     reflector = Reflector(evidence_overlap_threshold=args.gate_threshold)
     config = AgentConfig(
         max_steps=args.max_steps,
@@ -101,15 +113,20 @@ def main():
     ap.add_argument("--langgraph", action="store_true", help="额外演示 LangGraph 编排（需已安装）")
     ap.add_argument("--memory-db", default="",
                     help="跨会话长期记忆的 SQLite 文件；给了才启用（情景 + 语义两层）")
-    ap.add_argument("--user", default="cli", help="长期记忆的用户标识（换一个就是另一位车主）")
+    ap.add_argument("--user", default="cli", help="长期记忆与工单的用户标识（换一个就是另一位车主）")
+    ap.add_argument("--orders-db", default="",
+                    help="工单库路径（默认跟着 --memory-db 放，都没给就用进程内库）")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
+    # 长期记忆与工单库先于 agent 构建：工具需要它们来填默认参数、写事件
+    store = LongTermMemory(args.memory_db) if args.memory_db else None
+    args.longterm_store = store
+    args.orders_path = (args.orders_db
+                        or (f"{args.memory_db}.orders.db" if args.memory_db else ":memory:"))
     agent = build_agent(args)
     questions = args.question or DEMO_QUESTIONS
     start = time.perf_counter()
-    # 长期记忆：只有显式给了 --memory-db 才启用（不给就是旧行为）
-    store = LongTermMemory(args.memory_db) if args.memory_db else None
 
     def prepare_longterm(question: str) -> None:
         """先写本轮明示信息，再按本轮回读——同一轮里说的话当轮就生效。"""

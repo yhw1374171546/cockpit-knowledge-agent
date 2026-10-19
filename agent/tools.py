@@ -18,13 +18,13 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 from agent.answerability import expand_spec_query
 from agent.kb import Evidence, KnowledgeBase
+from agent.orders import OrderError, OrderStore
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -54,6 +54,9 @@ class ToolSpec:
     handler: Callable[..., ToolResult]
     write: bool = False
     requires_confirmation: bool = False
+    # 确认键的构造方式：默认沿用 item+日期（历史行为），带单号的写操作需要自定义，
+    # 否则"改期"和"取消"会共享同一个确认键。
+    action_key: Optional[Callable[[Dict[str, Any]], str]] = None
 
     def to_openai_schema(self) -> Dict[str, Any]:
         return {
@@ -121,11 +124,21 @@ class ToolRegistry:
     """工具注册表：schema 声明、调用、治理（确认/去重/计数/超时）。"""
 
     def __init__(self, kb: KnowledgeBase, telemetry: Optional[Dict] = None,
-                 specs_data: Optional[Dict] = None, maintenance: Optional[List] = None):
+                 specs_data: Optional[Dict] = None, maintenance: Optional[List] = None,
+                 orders: Optional[OrderStore] = None, user_id: str = "default",
+                 defaults: Optional[Dict[str, str]] = None,
+                 on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None):
         self.kb = kb
         self.telemetry = telemetry if telemetry is not None else dict(VEHICLE_TELEMETRY)
         self.specs_data = specs_data if specs_data is not None else VEHICLE_SPECS
         self.maintenance = maintenance if maintenance is not None else MAINTENANCE_PLAN
+        # 工单存储：不传就退化为进程内库（单测/演示够用；服务层必须注入持久化的那个）
+        self.orders = orders if orders is not None else OrderStore(":memory:")
+        # 当前调用者：工具层不信任模型给的 user_id，身份由调用方（服务层鉴权 / CLI / MCP _meta）注入
+        self.user_id = user_id
+        # 偏好默认值：例如长期记忆里的"惯用门店"，用来填补用户没说的参数
+        self.defaults = dict(defaults or {})
+        self.on_event = on_event
         self.confirmed_actions: set = set()
         self._cache: Dict[str, ToolResult] = {}
         self.call_counts: Dict[str, int] = {}
@@ -196,6 +209,52 @@ class ToolRegistry:
             write=True,
             requires_confirmation=True,
         ))
+        self.register(ToolSpec(
+            name="get_my_orders",
+            description=("查询当前车主的服务工单（预约）列表：单号、项目、日期、门店、状态。"
+                         "用户问「我那个保养预约怎么样了」「上次约的哪天」时先查这个。"),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "description": "返回条数，默认 5，最大 20",
+                              "minimum": 1, "maximum": 20},
+                    "status": {"type": "string", "description": "可选：只看某个状态",
+                               "enum": ["booked", "completed", "cancelled"]},
+                },
+                "required": [],
+            },
+            handler=self._get_my_orders,
+        ))
+        self.register(ToolSpec(
+            name="reschedule_order",
+            description="修改已有服务工单的到店日期或门店（写操作，需车主二次确认）。",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "order_id": {"type": "string", "description": "工单号，例如 SO92377763"},
+                    "new_date": {"type": "string", "description": "新的到店日期，格式 YYYY-MM-DD"},
+                    "center": {"type": "string", "description": "可选，换一家门店"},
+                },
+                "required": ["order_id", "new_date"],
+            },
+            handler=self._reschedule_order,
+            write=True,
+            requires_confirmation=True,
+            action_key=lambda args: f"reschedule_order:{args.get('order_id')}:{args.get('new_date')}",
+        ))
+        self.register(ToolSpec(
+            name="cancel_order",
+            description="取消一个尚未完成的服务工单（写操作，需车主二次确认）。",
+            parameters={
+                "type": "object",
+                "properties": {"order_id": {"type": "string", "description": "工单号"}},
+                "required": ["order_id"],
+            },
+            handler=self._cancel_order,
+            write=True,
+            requires_confirmation=True,
+            action_key=lambda args: f"cancel_order:{args.get('order_id')}",
+        ))
 
     def register(self, spec: ToolSpec) -> None:
         self.tools[spec.name] = spec
@@ -211,6 +270,10 @@ class ToolRegistry:
         scoped.telemetry = self.telemetry
         scoped.specs_data = self.specs_data
         scoped.maintenance = self.maintenance
+        scoped.orders = self.orders                          # 工单库父子共享
+        scoped.user_id = self.user_id
+        scoped.defaults = self.defaults
+        scoped.on_event = self.on_event
         scoped.confirmed_actions = self.confirmed_actions      # 确认状态在父子间共享
         scoped._cache = self._cache                            # 调用缓存共享，跨 Agent 去重
         scoped.call_counts = self.call_counts
@@ -249,7 +312,10 @@ class ToolRegistry:
         if spec is None:
             return ToolResult(False, error=f"未知工具 {name}",
                               hint=f"可用工具：{', '.join(self.names())}")
-        key = f"{name}:{json.dumps(arguments, ensure_ascii=False, sort_keys=True)}"
+        # 缓存键必须带调用者身份：跨进程（MCP）时服务端只有一个注册表，多个用户共用，
+        # 不带 user_id 的话「A 查工单得到空列表」会被缓存下来，B 一样查到空——串号泄漏。
+        # 这个 bug 是 test_mcp.TestOrdersOverMcp 抓出来的（本地单用户时永远发现不了）。
+        key = f"{self.user_id}:{name}:{json.dumps(arguments, ensure_ascii=False, sort_keys=True)}"
         if key in self._cache:
             cached = self._cache[key]
             repeated = ToolResult(cached.ok, cached.data, cached.error, cached.hint,
@@ -258,7 +324,8 @@ class ToolRegistry:
             return repeated
 
         if spec.requires_confirmation:
-            action_key = f"{name}:{arguments.get('item')}:{arguments.get('preferred_date')}"
+            action_key = (spec.action_key(arguments) if spec.action_key
+                          else f"{name}:{arguments.get('item')}:{arguments.get('preferred_date')}")
             if action_key not in self.confirmed_actions:
                 res = ToolResult(False, error="写操作需要车主确认",
                                  hint=f"请先向车主说明将执行「{arguments.get('item')}」并获取确认，"
@@ -341,19 +408,64 @@ class ToolRegistry:
         return ToolResult(True, data=data)
 
     def _create_service_order(self, item: str, preferred_date: str,
-                              center: str = "领克中心(浦东金桥店)") -> ToolResult:
-        if not re.match(r"^\d{4}-\d{2}-\d{2}$", preferred_date or ""):
-            return ToolResult(False, error="日期格式应为 YYYY-MM-DD",
-                              hint="例如 2025-06-18")
-        return ToolResult(True, data={
-            "预约单号": f"SO{int(time.time()) % 10**8:08d}",
-            "项目": item, "到店日期": preferred_date, "门店": center,
-            "状态": "已提交（待门店确认）",
-        })
+                              center: str = "") -> ToolResult:
+        # 用户没说门店时，先用偏好默认值（长期记忆里的"惯用门店"）——少问一句就少一轮
+        center = (center or "").strip() or self.defaults.get("center", "")
+        try:
+            order = self.orders.create(self.user_id, item, preferred_date, center)
+        except OrderError as exc:
+            return ToolResult(False, error=exc.message, hint=exc.hint,
+                              meta={"code": exc.code})
+        self._emit("order_created" if not order.existing else "order_reused", order.to_dict())
+        data = order.to_dict()
+        data["说明"] = ("已存在相同预约，未重复创建" if order.existing
+                       else "预约已创建，请提醒车主到店前一日确认")
+        return ToolResult(True, data=data, meta={"code": "ok", "order_id": order.id,
+                                                 "existing": order.existing})
+
+    def _get_my_orders(self, limit: int = 5, status: Optional[str] = None) -> ToolResult:
+        orders = self.orders.list(self.user_id, limit=limit, status=status)
+        if not orders:
+            return ToolResult(True, data={"工单": [], "说明": "当前车主还没有服务工单"},
+                              meta={"count": 0})
+        return ToolResult(True, data={"工单": [o.to_dict() for o in orders],
+                                      "说明": "；".join(o.summary() for o in orders)},
+                          meta={"count": len(orders)})
+
+    def _reschedule_order(self, order_id: str, new_date: str,
+                          center: Optional[str] = None) -> ToolResult:
+        try:
+            order = self.orders.reschedule(self.user_id, order_id, date=new_date, center=center)
+        except OrderError as exc:
+            return ToolResult(False, error=exc.message, hint=exc.hint,
+                              meta={"code": exc.code})
+        self._emit("order_rescheduled", order.to_dict())
+        return ToolResult(True, data=order.to_dict(),
+                          meta={"code": "ok", "order_id": order.id})
+
+    def _cancel_order(self, order_id: str) -> ToolResult:
+        try:
+            order = self.orders.cancel(self.user_id, order_id)
+        except OrderError as exc:
+            return ToolResult(False, error=exc.message, hint=exc.hint,
+                              meta={"code": exc.code})
+        self._emit("order_cancelled", order.to_dict())
+        return ToolResult(True, data=order.to_dict(),
+                          meta={"code": "ok", "order_id": order.id})
+
+    def _emit(self, action: str, payload: Dict[str, Any]) -> None:
+        """把写操作事件交给上层（服务层用它写长期记忆）。失败不影响工具结果。"""
+        if self.on_event is None:
+            return
+        try:
+            self.on_event(action, payload)
+        except Exception:                                          # noqa: BLE001
+            pass
 
 
 def build_default_registry(kb_path: Optional[str] = None,
-                           kb: Optional[KnowledgeBase] = None) -> ToolRegistry:
+                           kb: Optional[KnowledgeBase] = None,
+                           **kwargs: Any) -> ToolRegistry:
     """构建默认工具注册表。
 
     ⚠️ `kb` 参数是**性能关键**：学习一下这个坑——
@@ -364,9 +476,11 @@ def build_default_registry(kb_path: Optional[str] = None,
         而真正的一次 BM25 检索只要 ≈ 12 ms（比值 ~1345×）。
     并发压测因此测出 QPS 0.06、单请求 P50 16.8 s。
     传入已缓存的 `kb` 实例即可避免重建（有单测覆盖：`test_registry_reuses_cached_kb`）。
+
+    其余 `kwargs` 原样透传给 `ToolRegistry`（工单库 / 调用者身份 / 偏好默认值 / 事件钩子）。
     """
     kb = kb or KnowledgeBase.load(kb_path)
-    return ToolRegistry(kb)
+    return ToolRegistry(kb, **kwargs)
 
 
 if __name__ == "__main__":

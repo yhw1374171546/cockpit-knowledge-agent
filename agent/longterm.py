@@ -70,7 +70,7 @@ STOPWORDS = {
 # 高精度抽取规则：宁可少记，也不要把"我在上海出差"记成"常住上海"
 CITY_CUE = re.compile(r"(?:我住|我常住|我家在|我定居|我们住)(?:在)?\s*(" + "|".join(CITY_WORDS) + ")")
 MODEL_CUE = re.compile(r"(?:我的车是|我开的是|我买的是|我这台是)\s*(领克\s*0?[1-9])")
-CENTER_CUE = re.compile(r"(?:我(?:一般|通常|都|常|习惯)去|我就在)\s*([\u4e00-\u9fa5A-Za-z0-9()（）\-]{2,20}(?:店|中心))")
+CENTER_CUE = re.compile(r"(?:我(?:一般|通常|都|常|习惯)去|我就在)\s*([^\s，。！？、；]{2,30})")
 PREF_CUE = re.compile(
     r"(?:以后|今后|默认|每次|一直|记住)[^。！？\n]{0,12}?"
     r"(座椅加热|座椅通风|空调|氛围灯|方向盘加热|后视镜加热)(?:都|就|要)?(打开|关闭|开|关|调低|调高|开启)"
@@ -306,9 +306,11 @@ class LongTermMemory:
                                         source=source, label="车型"):
                 written.append(f"vehicle_model={name}")
         center = CENTER_CUE.search(text)
-        if center and self.remember_preference("usual_center", center.group(1), user_id=user_id,
-                                               source=source, label="惯用门店"):
-            written.append(f"usual_center={center.group(1)}")
+        if center:
+            value = center.group(1).strip().rstrip("，。")     # 括号里的门店名不能被截断
+            if ("店" in value or "中心" in value) and self.remember_preference(
+                    "usual_center", value, user_id=user_id, source=source, label="惯用门店"):
+                written.append(f"usual_center={value}")
         pref = PREF_CUE.search(text)
         if pref:
             feature, action = pref.group(1), ACTION_NORMALIZE.get(pref.group(2), pref.group(2))
@@ -398,6 +400,25 @@ class LongTermMemory:
                      now: Optional[float] = None) -> str:
         return self.recall(query, user_id=user_id, now=now).to_prompt()
 
+    def preference(self, user_id: str, key: str, *, now: Optional[float] = None) -> Optional[str]:
+        """取一条语义记忆的当前值（已过期或置信度不足则返回 None）。
+
+        用途是**给工具填默认参数**（例如惯用门店）——这是长期记忆唯一能立刻变现的地方：
+        用户说过一次"我一般去浦东店"，下次建工单就不用再说。
+        """
+        now = self._now() if now is None else now
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value, confidence, updated_at, expires_at FROM semantic"
+                " WHERE user_id=? AND key=?", (user_id, key)).fetchone()
+        if row is None or float(row["expires_at"]) < now:
+            return None
+        effective = float(row["confidence"]) * self.config.decay_per_day ** (
+            (now - float(row["updated_at"])) / DAY)
+        if effective < self.config.min_confidence:
+            return None
+        return str(row["value"])
+
     # ── 维护：过期、衰减、容量 ──
     def maintain(self, *, user_id: Optional[str] = None, now: Optional[float] = None) -> Dict[str, int]:
         now = self._now() if now is None else now
@@ -477,3 +498,47 @@ class LongTermMemory:
                 "SELECT action, key, old_value, new_value, reason, at FROM events"
                 " WHERE user_id=? ORDER BY id DESC LIMIT ?", (user_id, limit)).fetchall()
         return [dict(row) for row in rows]
+
+
+def defaults_from_preferences(store: Optional[LongTermMemory], user_id: str) -> Dict[str, str]:
+    """把偏好翻译成工具默认参数。只映射与工具契约对齐的键（目前是惯用门店）。"""
+    if store is None:
+        return {}
+    out: Dict[str, str] = {}
+    center = store.preference(user_id, "usual_center")
+    if center:
+        out["center"] = center
+    return out
+
+
+def order_event_recorder(store: Optional[LongTermMemory], user_id: str,
+                         session_id: str = "orders",
+                         query: str = "") -> Optional[Callable[[str, Dict[str, Any]], None]]:
+    """工单写操作 → 情景记忆。服务层、CLI、评测共用这一份，避免三处各写一遍。
+
+    `query` 是用户这句话：**带上它记忆才召回得到**。用户说"上次那个保养"，
+    而工单摘要里写的是"更换机油机滤"——不存原话，词面匹配就对不上（实测召回 0 条）。
+    """
+    if store is None:
+        return None
+    prefix = f"用户提到「{query[:30]}」；" if query else ""
+
+    def record(action: str, payload: Dict[str, Any]) -> None:
+        order_id = str(payload.get("预约单号") or "")
+        item = str(payload.get("项目") or "")
+        date = str(payload.get("到店日期") or "")
+        center = str(payload.get("门店") or "")
+        if action == "order_created":
+            text = f"{prefix}已建工单 {order_id}：{item}，{date} 到 {center}"
+        elif action == "order_reused":
+            text = f"{prefix}工单 {order_id} 已存在：{item}，{date} 到 {center}"
+        elif action == "order_rescheduled":
+            text = f"{prefix}工单 {order_id} 改期到 {date}" + (f"（{center}）" if center else "")
+        elif action == "order_cancelled":
+            text = f"{prefix}工单 {order_id} 已取消"
+        else:
+            return
+        store.remember_episode(text, user_id=user_id, session_id=session_id,
+                               dedupe_key=f"{session_id}:{action}:{order_id}:{date}")
+
+    return record

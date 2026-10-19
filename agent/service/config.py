@@ -111,6 +111,14 @@ class Settings:
     # 行为与引入该功能之前完全一致（默认关闭是为了不改变既有部署的语义）。
     longterm_db_path: str = ""
 
+    # 工单库（服务预约的真实状态）。留空时：配了长期记忆就跟着它放（`<longterm>.orders.db`），
+    # 否则退化为进程内库（重启即丢，只适合演示）。
+    orders_db_path: str = ""
+
+    # 到店日期不得早于今天。真实业务必须开；离线测试默认也开着，
+    # 需要固定日期断言时显式传 enforce_future_date=False。
+    enforce_future_date: bool = True
+
     # 默认租户（未带 X-Vehicle-Model 时使用）
     # ⚠️ 租户标识必须是 **ASCII**：它会出现在 HTTP 头里，而 HTTP 头不允许非 ASCII 字符。
     # 中文车型名请在网关层映射为代号（显示名单独维护），不要直接塞进 header。
@@ -169,6 +177,9 @@ class Settings:
             metrics_public=os.environ.get("SERVICE_METRICS_PUBLIC", "0").lower() in ("1", "true"),
             kb_path=os.environ.get("AGENT_KB_PATH", ""),
             longterm_db_path=os.environ.get("SERVICE_LONGTERM_DB", ""),
+            orders_db_path=os.environ.get("SERVICE_ORDERS_DB", ""),
+            enforce_future_date=os.environ.get("SERVICE_ENFORCE_FUTURE_DATE", "1").lower()
+            not in ("0", "false"),
             default_vehicle_model=os.environ.get("SERVICE_DEFAULT_VEHICLE_MODEL", "lynk08"),
             allowed_models=[m.strip() for m in models.split(",") if m.strip()],
         )

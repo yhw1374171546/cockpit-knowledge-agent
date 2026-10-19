@@ -37,11 +37,15 @@ class McpToolRegistry:
 
     def __init__(self, client: McpClient, name: str = "mcp",
                  allowed: Optional[Sequence[str]] = None,
-                 timeout: Optional[float] = None):
+                 timeout: Optional[float] = None,
+                 user_id: Optional[str] = None):
         self.client = client
         self.scope_name = name
         self.timeout = timeout
         self.transport = "mcp"
+        # 调用者身份：服务端没有"当前用户"的概念，必须每次调用随 `_meta` 带过去。
+        # 工单类工具（查/改/取消）全靠它做用户隔离。
+        self.user_id = user_id
         self._tools: Dict[str, Dict[str, Any]] = {}
         for tool in client.list_tools():
             tool_name = tool.get("name")
@@ -93,6 +97,7 @@ class McpToolRegistry:
         scoped.scope_name = name
         scoped.timeout = self.timeout
         scoped.transport = self.transport
+        scoped.user_id = self.user_id
         scoped._tools = self._tools
         scoped._allowed = [n for n in names if n in self._allowed]
         scoped.confirmed_actions = self.confirmed_actions      # 确认状态父子共享
@@ -134,7 +139,8 @@ class McpToolRegistry:
         trace_id = self._new_trace_id()
         started = time.perf_counter()
         try:
-            payload = self.client.call_tool(name, arguments, trace_id=trace_id, timeout=self.timeout)
+            payload = self.client.call_tool(name, arguments, trace_id=trace_id,
+                                            user_id=self.user_id, timeout=self.timeout)
         except McpTimeout as exc:
             return self._fail(name, arguments, trace_id, "MCP 调用超时",
                               f"{exc}；写操作不会被自动重试，避免重复下单")

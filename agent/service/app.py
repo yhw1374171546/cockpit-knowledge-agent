@@ -43,9 +43,10 @@ from agent.graph import AgentConfig, AgentGraph, AgentState
 from agent.guardrails.policy import PolicyEngine
 from agent.kb import KnowledgeBase
 from agent.llm import LLMBackend, OpenAICompatibleLLM, RuleBasedPlannerLLM, StreamingRulePlanner
-from agent.longterm import LongTermMemory
+from agent.longterm import LongTermMemory, defaults_from_preferences, order_event_recorder
 from agent.memory import ConversationMemory, VehicleProfile
 from agent.obs.tracer import Tracer
+from agent.orders import OrderStore
 from agent.reflection import Reflector
 from agent.service.auth import AuthError, Principal, decode_token, issue_token, resolve_tenant
 from agent.service.config import Settings
@@ -116,6 +117,18 @@ class AgentRuntime:
         self._lock = threading.Lock()
         self.kb_load_ms = 0.0
         self._longterm: Optional[LongTermMemory] = None
+        self._orders: Optional[OrderStore] = None
+
+    @property
+    def orders(self) -> OrderStore:
+        """工单库：配了 `SERVICE_ORDERS_DB` 用它，否则跟着长期记忆库放，最后退化进程内库。"""
+        if self._orders is None:
+            path = self.settings.orders_db_path
+            if not path and self.settings.longterm_db_path:
+                path = self.settings.longterm_db_path + ".orders.db"
+            self._orders = OrderStore(path or ":memory:",
+                                      enforce_future_date=self.settings.enforce_future_date)
+        return self._orders
 
     @property
     def longterm(self) -> Optional[LongTermMemory]:
@@ -129,11 +142,14 @@ class AgentRuntime:
             return self._longterm
 
     def close(self) -> None:
-        """释放跨会话记忆的 SQLite 连接（不关的话 Windows 上文件删不掉，也算资源泄漏）。"""
+        """释放跨会话记忆与工单的 SQLite 连接（不关的话 Windows 上文件删不掉，也算资源泄漏）。"""
         with self._lock:
             if self._longterm is not None:
                 self._longterm.close()
                 self._longterm = None
+            if self._orders is not None:
+                self._orders.close()
+                self._orders = None
 
     def kb(self, vehicle_model: str) -> KnowledgeBase:
         key = f"{vehicle_model}|{self.settings.kb_path or 'default'}"
@@ -175,14 +191,23 @@ class AgentRuntime:
                     on_delta: Optional[Callable[[str], None]] = None,
                     idempotency_key: str = "",
                     history: Optional[List[Tuple[str, str]]] = None,
-                    kb: Optional[KnowledgeBase] = None
+                    kb: Optional[KnowledgeBase] = None,
+                    user_id: str = "",
+                    query: str = ""
                     ) -> Tuple[AgentGraph, Tracer, ToolRegistry]:
         # kb 允许外部注入：多版本路由（灰度/回滚）时由 KBRegistry 决定用哪个版本的实例，
         # 不再从这里按车型固定取缓存。
         kb = kb if kb is not None else self.kb(vehicle_model)
         # 把**已缓存的 kb** 传进去：否则这里会从磁盘重新加载并重建 BM25 索引
         # （9301 块实测 ≈16 s/次，而单次检索只要 ≈12 ms），缓存就白做了。
-        registry = build_default_registry(self.settings.kb_path or None, kb=kb)
+        longterm = self.longterm
+        registry = build_default_registry(
+            self.settings.kb_path or None, kb=kb,
+            orders=self.orders,                       # 工单是真实有状态的对象
+            user_id=user_id or "default",             # 身份由鉴权层注入，不信模型
+            defaults=defaults_from_preferences(longterm, user_id),   # 惯用门店自动填参
+            on_event=order_event_recorder(longterm, user_id, f"svc:{vehicle_model}", query),
+        )
         if confirmed:
             registry.confirmed_actions |= set(confirmed)
         tracer = Tracer()
@@ -1114,7 +1139,7 @@ def _run_and_persist(request: Request, ctx: Dict[str, Any],
     agent, tracer, registry = runtime.build_agent(
         ctx["vehicle_model"], confirmed, on_delta,
         idempotency_key=ctx.get("idempotency_key") or "", history=history,
-        kb=versioned_kb)
+        kb=versioned_kb, user_id=ctx["user_id"], query=ctx["message"])
     # 断连取消（BE7）：流式端点会把这个 Event 放进 ctx；非流式请求为 None
     agent.config.cancel_event = ctx.get("cancel_event")
 

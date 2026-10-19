@@ -66,6 +66,9 @@ def make_settings(tmpdir: str, **overrides) -> Settings:
         llm_backend="planner",
         default_vehicle_model="lynk08",
         allowed_models=["lynk08", "lynk09"],
+        # 测试用固定日期（2025-06-18）做断言，因此关掉"日期不得早于今天"；
+        # 这条规则本身由 TestOrderLifecycleInService 显式打开后单独覆盖。
+        enforce_future_date=False,
     )
     base.update(overrides)
     return Settings(**base)
@@ -1190,6 +1193,57 @@ class TestLongTermMemoryInService(ServiceTestBase):
         self.assertFalse(settings.longterm_db_path)
         from agent.service.app import AgentRuntime
         self.assertIsNone(AgentRuntime(settings).longterm)
+
+
+class TestOrderLifecycleInService(ServiceTestBase):
+    """工单是真实有状态的业务对象：确认后落库、日期规则在服务层生效。"""
+
+    ITEM = "更换机油机滤"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.settings = make_settings(self._tmp.name, enforce_future_date=True)
+        self.app = create_app(self.settings)
+        self.client_ctx = TestClient(self.app)
+        self.client = self.client_ctx.__enter__()
+        self.token = self._token("u1", "driver", "lynk08")
+        self.h = self._auth_headers(self.token)
+        self.app.state.runtime.build_llm = lambda on_delta=None: ScriptedWriteLLM(
+            self.ITEM, "2099-06-18")
+
+    def tearDown(self):
+        runtime = getattr(self.app.state, "runtime", None)
+        if runtime is not None:
+            runtime.close()
+        super().tearDown()
+
+    def _confirm(self, date: str) -> None:
+        key = f"create_service_order:{self.ITEM}:{date}"
+        resp = self.client.post("/v1/writes/confirm", json={"action_key": key}, headers=self.h)
+        self.assertEqual(resp.status_code, 200, resp.text)
+
+    def test_confirmed_write_persists_order(self):
+        self._confirm("2099-06-18")
+        headers = self._auth_headers(self.token, {"Idempotency-Key": "order-1"})
+        body = self.chat("帮我预约到店保养", headers=headers).json()
+        calls = [c for c in body["tool_calls"] if c["tool"] == "create_service_order"]
+        self.assertTrue(calls and calls[0]["ok"], calls)
+        orders = self.app.state.runtime.orders.list("u1")
+        self.assertEqual(len(orders), 1, orders)
+        self.assertEqual(orders[0].date, "2099-06-18")
+        self.assertEqual(orders[0].status, "booked")
+
+    def test_past_date_is_rejected_and_nothing_is_written(self):
+        self.app.state.runtime.build_llm = lambda on_delta=None: ScriptedWriteLLM(
+            self.ITEM, "2020-01-01")
+        self._confirm("2020-01-01")
+        headers = self._auth_headers(self.token, {"Idempotency-Key": "order-past"})
+        body = self.chat("帮我预约到店保养", headers=headers).json()
+        calls = [c for c in body["tool_calls"] if c["tool"] == "create_service_order"]
+        self.assertTrue(calls)
+        self.assertFalse(calls[0]["ok"], calls)
+        self.assertIn("早于今天", calls[0]["reason"])
+        self.assertEqual(self.app.state.runtime.orders.list("u1"), [])
 
 
 if __name__ == "__main__":

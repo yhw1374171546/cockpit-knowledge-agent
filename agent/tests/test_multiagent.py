@@ -73,7 +73,8 @@ class TestToolWhitelist(unittest.TestCase):
         self.assertEqual(set(specs["manual_expert"]), {"search_manual", "lookup_vehicle_spec"})
         self.assertEqual(set(specs["vehicle_control"]), {"get_vehicle_status", "search_manual"})
         self.assertEqual(set(specs["service_advisor"]),
-                         {"get_maintenance_plan", "search_manual", "create_service_order"})
+                         {"get_maintenance_plan", "search_manual", "create_service_order",
+                          "get_my_orders", "reschedule_order", "cancel_order"})
         # 车控专家不该持有写操作工具
         self.assertNotIn("create_service_order", specs["vehicle_control"])
 

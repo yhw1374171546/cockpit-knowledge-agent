@@ -81,7 +81,8 @@ class TestProtocol(unittest.TestCase):
         self.assertEqual(
             [t["name"] for t in tools],
             ["search_manual", "get_vehicle_status", "lookup_vehicle_spec",
-             "get_maintenance_plan", "create_service_order"],
+             "get_maintenance_plan", "create_service_order",
+             "get_my_orders", "reschedule_order", "cancel_order"],
         )
         for tool in tools:
             self.assertEqual(tool["inputSchema"]["type"], "object")
@@ -328,6 +329,45 @@ class TestTracePassthrough(unittest.TestCase):
         self.assertTrue(str(entry["trace_id"]).startswith("mcp-"))
         self.assertIsNotNone(entry["server_ms"])
         self.assertEqual(entry["transport"], "mcp")
+
+
+class TestOrdersOverMcp(unittest.TestCase):
+    """工单工具跨进程可用，且**用户隔离靠 `_meta.user_id` 随调用传递**。"""
+
+    def setUp(self):
+        self.client = make_client()
+        self.alice = McpToolRegistry(self.client, user_id="alice")
+        self.bob = McpToolRegistry(self.client, user_id="bob")
+
+    def tearDown(self):
+        self.client.close()
+
+    def _create(self, registry, date="2099-06-18"):
+        args = {"item": "更换机油机滤", "preferred_date": date, "center": "浦东店"}
+        pending = registry.call("create_service_order", dict(args))
+        self.assertTrue(pending.meta.get("needs_confirmation"), pending.error)
+        registry.confirm(pending.meta["action_key"])
+        return registry.call("create_service_order", dict(args))
+
+    def test_orders_are_created_and_listed_over_mcp(self):
+        created = self._create(self.alice)
+        self.assertTrue(created.ok, created.error)
+        listed = self.alice.call("get_my_orders", {})
+        self.assertTrue(listed.ok, listed.error)
+        self.assertEqual(len(listed.data["工单"]), 1)
+        self.assertEqual(listed.data["工单"][0]["预约单号"], created.data["预约单号"])
+
+    def test_other_user_cannot_see_or_cancel_the_order(self):
+        created = self._create(self.alice)
+        order_id = created.data["预约单号"]
+        self.assertEqual(self.bob.call("get_my_orders", {}).data["工单"], [])
+        pending = self.bob.call("cancel_order", {"order_id": order_id})
+        self.bob.confirm(pending.meta["action_key"])
+        denied = self.bob.call("cancel_order", {"order_id": order_id})
+        self.assertFalse(denied.ok)
+        self.assertEqual(denied.meta.get("code"), "not_found")
+        # 原主人的单子还在
+        self.assertEqual(self.alice.call("get_my_orders", {}).data["工单"][0]["状态"], "booked")
 
 
 if __name__ == "__main__":

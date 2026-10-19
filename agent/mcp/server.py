@@ -222,21 +222,29 @@ class McpServer:
 
         meta = params.get("_meta") or {}
         trace_id = meta.get("trace_id") if isinstance(meta, dict) else None
+        # 身份随调用走：服务端不持有"当前用户"，每次调用由客户端在 _meta 里带 user_id。
+        # 这是 stdio 单客户端的简化做法；多客户端场景应换成服务端签发的 scope token（见 README）。
+        user_id = meta.get("user_id") if isinstance(meta, dict) else None
+        previous_user = self.registry.user_id
+        if isinstance(user_id, str) and user_id:
+            self.registry.user_id = user_id
         started = time.perf_counter()
+        try:
+            if name in CONTROL_TOOLS:
+                self.control_calls += 1
+                result = self._control(name, arguments)
+                return tool_payload(result, trace_id=trace_id, control=True,
+                                    server_ms=(time.perf_counter() - started) * 1000)
 
-        if name in CONTROL_TOOLS:
-            self.control_calls += 1
-            result = self._control(name, arguments)
-            return tool_payload(result, trace_id=trace_id, control=True,
+            if name not in self.registry.names():
+                raise McpError(INVALID_PARAMS, f"未知工具 {name}", {"tools": self.registry.names()})
+
+            result = self.registry.call(name, arguments)
+            self.calls_served += 1
+            return tool_payload(result, trace_id=trace_id,
                                 server_ms=(time.perf_counter() - started) * 1000)
-
-        if name not in self.registry.names():
-            raise McpError(INVALID_PARAMS, f"未知工具 {name}", {"tools": self.registry.names()})
-
-        result = self.registry.call(name, arguments)
-        self.calls_served += 1
-        return tool_payload(result, trace_id=trace_id,
-                            server_ms=(time.perf_counter() - started) * 1000)
+        finally:
+            self.registry.user_id = previous_user
 
     def _control(self, name: str, arguments: Dict[str, Any]) -> ToolResult:
         if name == "confirm_action":

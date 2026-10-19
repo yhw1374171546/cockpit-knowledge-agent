@@ -216,11 +216,16 @@ class McpClient:
         return [t for t in tools if isinstance(t, dict)]
 
     def call_tool(self, name: str, arguments: Optional[Dict[str, Any]] = None,
-                  trace_id: Optional[str] = None,
+                  trace_id: Optional[str] = None, user_id: Optional[str] = None,
                   timeout: Optional[float] = None) -> Dict[str, Any]:
         params: Dict[str, Any] = {"name": name, "arguments": arguments or {}}
+        meta: Dict[str, Any] = {}
         if trace_id:
-            params["_meta"] = {"trace_id": trace_id}
+            meta["trace_id"] = trace_id
+        if user_id:
+            meta["user_id"] = user_id
+        if meta:
+            params["_meta"] = meta
         return self.request("tools/call", params, timeout=timeout)
 
     def ping(self) -> bool:

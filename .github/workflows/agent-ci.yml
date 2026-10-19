@@ -82,6 +82,12 @@ jobs:
       - name: Long-term memory (写入策略 / 冲突 / 遗忘 / 脱敏 / 召回)
         run: python agent/tests/test_memory_longterm.py
 
+      - name: Service orders (状态机 / 幂等 / 跨用户隔离 / 工具集成)
+        run: python agent/tests/test_orders.py
+
+      - name: Order flow demo (建单 → 跨会话改期 → 取消)
+        run: python eval/order_flow.py
+
       - name: Memory AB (记忆是否真的在决策路径上)
         run: python eval/memory_ab.py
 
