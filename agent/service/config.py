@@ -107,6 +107,10 @@ class Settings:
     # 知识库
     kb_path: str = ""
 
+    # 长期记忆（跨会话，情景 + 语义）：指到一个 SQLite 文件才启用；留空则完全关闭，
+    # 行为与引入该功能之前完全一致（默认关闭是为了不改变既有部署的语义）。
+    longterm_db_path: str = ""
+
     # 默认租户（未带 X-Vehicle-Model 时使用）
     # ⚠️ 租户标识必须是 **ASCII**：它会出现在 HTTP 头里，而 HTTP 头不允许非 ASCII 字符。
     # 中文车型名请在网关层映射为代号（显示名单独维护），不要直接塞进 header。
@@ -164,6 +168,7 @@ class Settings:
             shutdown_grace_s=_float("SERVICE_SHUTDOWN_GRACE_S", 20.0),
             metrics_public=os.environ.get("SERVICE_METRICS_PUBLIC", "0").lower() in ("1", "true"),
             kb_path=os.environ.get("AGENT_KB_PATH", ""),
+            longterm_db_path=os.environ.get("SERVICE_LONGTERM_DB", ""),
             default_vehicle_model=os.environ.get("SERVICE_DEFAULT_VEHICLE_MODEL", "lynk08"),
             allowed_models=[m.strip() for m in models.split(",") if m.strip()],
         )

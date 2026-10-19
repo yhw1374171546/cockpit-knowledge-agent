@@ -93,6 +93,13 @@ class ConversationMemory:
         self.turns: List[Turn] = []
         self.profile = profile or VehicleProfile()
         self.current_topic: Optional[str] = None
+        # 跨会话记忆（情景 + 语义）的注入位：由 `agent.longterm.LongTermMemory` 生成，
+        # 为空时行为与旧版完全一致（不引入任何额外 token）。
+        self.longterm_context: str = ""
+
+    def attach_longterm(self, text: str) -> None:
+        """挂上跨会话记忆文本（已格式化）。空字符串等价于"没开长期记忆"。"""
+        self.longterm_context = (text or "").strip()
 
     # ── 写入 ──
     def add_user(self, text: str) -> None:
@@ -241,4 +248,6 @@ class ConversationMemory:
         history = self.history_text(4)
         if history:
             lines.append("最近对话：\n" + history)
+        if self.longterm_context:
+            lines.append(self.longterm_context)
         return "\n".join(lines)

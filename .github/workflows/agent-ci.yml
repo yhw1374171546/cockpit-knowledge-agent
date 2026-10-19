@@ -79,6 +79,12 @@ jobs:
           AGENT_KB_PATH: eval/fixtures/mini_corpus.jsonl
         run: python agent/tests/test_mcp.py
 
+      - name: Long-term memory (写入策略 / 冲突 / 遗忘 / 脱敏 / 召回)
+        run: python agent/tests/test_memory_longterm.py
+
+      - name: Memory AB (记忆是否真的在决策路径上)
+        run: python eval/memory_ab.py
+
       - name: Extra eval smoke (multi-turn / colloquial / edge / citation)
         run: python eval/eval_extra_smoke.py
 

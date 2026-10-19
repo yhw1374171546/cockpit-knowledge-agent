@@ -17,6 +17,7 @@ import os
 import sys
 import tempfile
 import unittest
+import uuid
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
@@ -1119,6 +1120,76 @@ class TestGracefulShutdown(ServiceTestBase):
                           "停机指标没有记录")
         finally:
             tmp.cleanup()
+
+
+class TestLongTermMemoryInService(ServiceTestBase):
+    """SERVICE_LONGTERM_DB 启用后：跨会话偏好必须落到库里，并在下一次请求里被读到。
+
+    这条测试补的正是"接进链路"这一步——`eval/memory_ab.py` 证明的是
+    "挂上之后模型看得到"，这里证明的是"服务层真的挂上了"。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.settings = make_settings(self._tmp.name,
+                                      longterm_db_path=os.path.join(self._tmp.name, "lt.db"))
+        self.app = create_app(self.settings)
+        self.client_ctx = TestClient(self.app)
+        self.client = self.client_ctx.__enter__()
+        self.token = self._token("u1", "driver", "lynk08")
+        self.h = self._auth_headers(self.token)
+
+    def _store(self):
+        from agent.longterm import LongTermMemory
+        return LongTermMemory(self.settings.longterm_db_path)
+
+    def test_preference_written_then_recalled_next_session(self):
+        first = self.chat("我住在上海，以后座椅加热都关掉")
+        self.assertEqual(first.status_code, 200, first.text)
+        store = self._store()
+        try:
+            stats = store.stats("u1")
+            self.assertGreaterEqual(stats["semantic"], 2, stats)   # city + pref
+            self.assertGreaterEqual(stats["episodic"], 1, stats)    # 本轮情景摘要
+            self.assertIn("上海", store.context_text("帮我约个保养", user_id="u1"))
+        finally:
+            store.close()
+
+        # 换一个会话 ID（模拟隔天再问）：服务层仍能读到上一条偏好
+        second = self.chat("怎么打开危险警告灯", session_id=str(uuid.uuid4()))
+        self.assertEqual(second.status_code, 200, second.text)
+        store = self._store()
+        try:
+            self.assertGreaterEqual(store.stats("u1")["episodic"], 2)
+        finally:
+            store.close()
+
+    def tearDown(self):
+        # 先关掉服务端持有的 SQLite 连接，否则 Windows 上临时目录删不掉（WinError 32）
+        runtime = getattr(self.app.state, "runtime", None)
+        if runtime is not None:
+            runtime.close()
+        super().tearDown()
+
+    def test_memory_fingerprint_changes_after_write(self):
+        """记忆指纹进缓存 scope：偏好一改，旧缓存自然失效（否则"记住了但不生效"）。"""
+        store = self._store()
+        try:
+            before = store.fingerprint("u1")
+        finally:
+            store.close()
+        self.chat("我住在上海")
+        store = self._store()
+        try:
+            self.assertNotEqual(before, store.fingerprint("u1"))
+        finally:
+            store.close()
+
+    def test_disabled_by_default_writes_nothing(self):
+        settings = make_settings(self._tmp.name)          # 不带 longterm_db_path
+        self.assertFalse(settings.longterm_db_path)
+        from agent.service.app import AgentRuntime
+        self.assertIsNone(AgentRuntime(settings).longterm)
 
 
 if __name__ == "__main__":

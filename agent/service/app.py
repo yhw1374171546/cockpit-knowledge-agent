@@ -43,6 +43,7 @@ from agent.graph import AgentConfig, AgentGraph, AgentState
 from agent.guardrails.policy import PolicyEngine
 from agent.kb import KnowledgeBase
 from agent.llm import LLMBackend, OpenAICompatibleLLM, RuleBasedPlannerLLM, StreamingRulePlanner
+from agent.longterm import LongTermMemory
 from agent.memory import ConversationMemory, VehicleProfile
 from agent.obs.tracer import Tracer
 from agent.reflection import Reflector
@@ -114,6 +115,25 @@ class AgentRuntime:
         self._kb_cache: Dict[str, KnowledgeBase] = {}
         self._lock = threading.Lock()
         self.kb_load_ms = 0.0
+        self._longterm: Optional[LongTermMemory] = None
+
+    @property
+    def longterm(self) -> Optional[LongTermMemory]:
+        """跨会话长期记忆；`SERVICE_LONGTERM_DB` 未配置时为 None（行为与旧版一致）。"""
+        if not self.settings.longterm_db_path:
+            return None
+        with self._lock:
+            if self._longterm is None:
+                self._longterm = LongTermMemory(self.settings.longterm_db_path)
+                logger.info("长期记忆已启用 path=%s", self.settings.longterm_db_path)
+            return self._longterm
+
+    def close(self) -> None:
+        """释放跨会话记忆的 SQLite 连接（不关的话 Windows 上文件删不掉，也算资源泄漏）。"""
+        with self._lock:
+            if self._longterm is not None:
+                self._longterm.close()
+                self._longterm = None
 
     def kb(self, vehicle_model: str) -> KnowledgeBase:
         key = f"{vehicle_model}|{self.settings.kb_path or 'default'}"
@@ -452,6 +472,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                                left, settings.shutdown_grace_s)
             METRICS.inc("agent_shutdown_total", {"drained": str(drained).lower()})
             db.engine.dispose()
+            app.state.runtime.close()
 
     app = FastAPI(title="智能座舱 Agent 服务", version=settings.version,
                   description="RAG + 多 Agent 座舱助手的服务化封装（鉴权/限流/配额/幂等/审计/SSE）",
@@ -1097,6 +1118,15 @@ def _run_and_persist(request: Request, ctx: Dict[str, Any],
     # 断连取消（BE7）：流式端点会把这个 Event 放进 ctx；非流式请求为 None
     agent.config.cancel_event = ctx.get("cancel_event")
 
+    # ── 长期记忆（跨会话）：SERVICE_LONGTERM_DB 未配置时 longterm 为 None，整段跳过 ──
+    # 先抽本轮「明示」信息（"我住上海""以后座椅加热都关掉"），再按本轮回读：
+    # 同一轮里说的话当轮就能用上；推断类信息不写（策略见 agent/longterm.py）。
+    longterm = runtime.longterm
+    if longterm is not None:
+        longterm.extract_and_remember(ctx["message"], user_id=ctx["user_id"])
+        agent.memory.attach_longterm(
+            longterm.context_text(ctx["message"], user_id=ctx["user_id"]))
+
     # ── 语义缓存：命中则**完全跳过** agent.run()（省一次检索 + 一次大模型调用）──
     # 键的作用域是「车型租户」，指纹里包含车况与角色：
     #   ① 不同租户即使问同一句，也各自独立（手册版本/政策口径可能不同）；
@@ -1106,7 +1136,10 @@ def _run_and_persist(request: Request, ctx: Dict[str, Any],
                                             role=getattr(ctx.get("principal"), "role", "driver"))
     # 作用域必须含**知识库版本**：否则切换/灰度版本之后，语义缓存仍会把旧版本的答案返给新版本
     # 的请求——"版本切了但回答还是老的"，这是比缓存不命中严重得多的正确性问题。
-    scope = f"{ctx['vehicle_model']}|{kb_version}"
+    # 还必须含**记忆指纹**：用户刚说"以后座椅加热都关掉"，车型与车况都没变，
+    # 不加指纹就会把旧答案原样返回——"记住了但不生效"。
+    memory_fp = longterm.fingerprint(ctx["user_id"]) if longterm is not None else "-"
+    scope = f"{ctx['vehicle_model']}|{kb_version}|{memory_fp}"
     # 有历史的多轮请求不查缓存：同一个问法在不同上下文里的含义可能不同（指代/话题继承）。
     cacheable_req = (cache is not None and not ctx.get("idempotency_key")
                      and not history and len(ctx["message"]) >= 4)
@@ -1281,6 +1314,13 @@ def _run_and_persist(request: Request, ctx: Dict[str, Any],
         if ctx.get("idempotency_key"):
             idem_store.complete_in_session(session, ctx["user_id"], ctx["idempotency_key"],
                                            response.model_dump())
+
+    # ── 长期记忆写回（事务之外：记忆是可再生的辅助数据，不能因为它失败而回滚业务结果）──
+    if longterm is not None and state.answer and state.status in ("answered", "needs_confirmation"):
+        longterm.remember_episode(
+            f"问「{ctx['message'][:40]}」→ {state.answer[:60]}",
+            user_id=ctx["user_id"], session_id=ctx["session_id"],
+            dedupe_key=f"{ctx['session_id']}:{ctx['message'][:120]}")
 
     return response
 

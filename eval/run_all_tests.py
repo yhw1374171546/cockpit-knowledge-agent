@@ -33,6 +33,7 @@ SUITES = [
     "test_fc_pipeline.py",
     "test_multiagent.py",
     "test_mcp.py",
+    "test_memory_longterm.py",
     "test_answerability.py",
     "test_vector_store.py",
     "test_sse.py",

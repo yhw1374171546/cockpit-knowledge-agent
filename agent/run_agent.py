@@ -25,6 +25,7 @@ import time
 
 from agent.graph import AgentConfig, AgentGraph, build_langgraph_app
 from agent.llm import OpenAICompatibleLLM, RuleBasedPlannerLLM
+from agent.longterm import LongTermMemory
 from agent.memory import ConversationMemory, VehicleProfile
 from agent.reflection import Reflector
 from agent.tools import build_default_registry
@@ -98,12 +99,31 @@ def main():
     ap.add_argument("--supervisor", action="store_true",
                     help="用多 Agent（Supervisor + 专家）而非单 Agent 运行")
     ap.add_argument("--langgraph", action="store_true", help="额外演示 LangGraph 编排（需已安装）")
+    ap.add_argument("--memory-db", default="",
+                    help="跨会话长期记忆的 SQLite 文件；给了才启用（情景 + 语义两层）")
+    ap.add_argument("--user", default="cli", help="长期记忆的用户标识（换一个就是另一位车主）")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
     agent = build_agent(args)
     questions = args.question or DEMO_QUESTIONS
     start = time.perf_counter()
+    # 长期记忆：只有显式给了 --memory-db 才启用（不给就是旧行为）
+    store = LongTermMemory(args.memory_db) if args.memory_db else None
+
+    def prepare_longterm(question: str) -> None:
+        """先写本轮明示信息，再按本轮回读——同一轮里说的话当轮就生效。"""
+        if store is None:
+            return
+        store.extract_and_remember(question, user_id=args.user)
+        agent.memory.attach_longterm(store.context_text(question, user_id=args.user))
+
+    def remember_turn(question: str, state) -> None:
+        if store is None or not state.answer:
+            return
+        store.remember_episode(f"问「{question[:40]}」→ {state.answer[:60]}",
+                               user_id=args.user, session_id="cli",
+                               dedupe_key=f"cli:{question[:120]}")
 
     if args.supervisor:
         # 多 Agent 模式：Supervisor 拆解 → 专家并行处理 → 冲突仲裁 → 安全评审
@@ -132,18 +152,28 @@ def main():
                   f"(派发 {st.latency_ms.get('dispatch', 0):.1f} / 评审 "
                   f"{st.latency_ms.get('review', 0):.1f})  tokens={st.tokens_total}")
         print(f"\n共 {len(questions)} 题，总耗时 {(time.perf_counter() - start):.2f} s")
+        if store is not None:
+            store.close()
         return
 
     agent_run = agent
     if args.multi_turn:
         for q in questions:
-            print_state(agent_run.run(q), args.verbose)
+            prepare_longterm(q)
+            state = agent_run.run(q)
+            remember_turn(q, state)
+            print_state(state, args.verbose)
     else:
         for q in questions:
-            # 单轮评测：每个问题用独立记忆，避免话题串味
+            # 单轮评测：每个问题用独立记忆，避免话题串味（长期记忆不随这里重置）
             agent_run.memory = ConversationMemory(
                 window=6, profile=VehicleProfile(model="领克08", mileage_km=23860))
-            print_state(agent_run.run(q), args.verbose)
+            prepare_longterm(q)
+            state = agent_run.run(q)
+            remember_turn(q, state)
+            print_state(state, args.verbose)
+    if store is not None:
+        store.close()
     print(f"\n共 {len(questions)} 题，总耗时 {(time.perf_counter() - start):.2f} s")
 
     if args.langgraph:

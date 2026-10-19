@@ -89,7 +89,7 @@ check_untyped_defs = true
 # 只检查被显式列出的模块的**内部**错误；被导入模块的类型仍会被使用，但不报它们的错。
 # （否则一个 SQLAlchemy Column[str] 的噪音会把整份报告淹没，最后没人看 mypy）
 follow_imports = "silent"
-# 渐进式覆盖：以下 20 个模块当前为**零类型错误**（已本机验证）。
+# 渐进式覆盖：以下 21 个模块当前为**零类型错误**（已本机验证）。
 # 其余模块待 SQLAlchemy 迁移到 `Mapped[T]` 声明式类型后再逐步纳入——
 # 那些报错绝大多数是 `Column[str]` vs `str`，靠 `# type: ignore` 糊过去没有意义。
 files = [
@@ -113,4 +113,5 @@ files = [
     "agent/mcp/server.py",
     "agent/mcp/client.py",
     "agent/mcp/registry.py",
+    "agent/longterm.py",
 ]
