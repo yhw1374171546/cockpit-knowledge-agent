@@ -28,13 +28,16 @@ from agent.llm import RuleBasedPlannerLLM  # noqa: E402
 from agent.mcp.client import McpClient  # noqa: E402
 from agent.mcp.protocol import (  # noqa: E402
     CONTROL_TOOLS,
+    FORBIDDEN,
     PROTOCOL_VERSION,
     McpError,
     McpTimeout,
 )
 from agent.mcp.registry import McpToolRegistry  # noqa: E402
+from agent.mcp.scope import issue_scope_token  # noqa: E402
 from agent.obs import Tracer  # noqa: E402
 from agent.orchestrator import Supervisor  # noqa: E402
+from agent.repair_advisor import RepairAdvisor  # noqa: E402
 from agent.tools import ToolRegistry  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -368,6 +371,65 @@ class TestOrdersOverMcp(unittest.TestCase):
         self.assertEqual(denied.meta.get("code"), "not_found")
         # 原主人的单子还在
         self.assertEqual(self.alice.call("get_my_orders", {}).data["工单"][0]["状态"], "booked")
+
+
+class TestScopeToken(unittest.TestCase):
+    """服务端鉴权：token 决定能看/能调哪些工具，越权**在服务端**被拒（不是客户端白名单）。"""
+
+    SECRET = "test-scope-secret"
+    READONLY = ("search_manual", "get_maintenance_plan", "get_my_orders", "get_vehicle_status")
+
+    def _client(self, token: str = ""):
+        return McpClient(args=[*SERVER_ARGS, "--scope-secret", self.SECRET],
+                         timeout=TIMEOUT, scope_token=token)
+
+    def test_missing_token_is_rejected(self):
+        with self.assertRaises(McpError) as ctx:
+            self._client("").start()
+        self.assertEqual(ctx.exception.code, FORBIDDEN)
+
+    def test_bad_signature_is_rejected(self):
+        token = issue_scope_token("repair", self.READONLY, "wrong-secret")
+        with self.assertRaises(McpError) as ctx:
+            self._client(token).start()
+        self.assertEqual(ctx.exception.code, FORBIDDEN)
+
+    def test_expired_token_is_rejected(self):
+        token = issue_scope_token("repair", self.READONLY, self.SECRET, ttl_s=-10)
+        with self.assertRaises(McpError) as ctx:
+            self._client(token).start()
+        self.assertEqual(ctx.exception.code, FORBIDDEN)
+
+    def test_readonly_scope_filters_tools(self):
+        client = self._client(issue_scope_token("repair", self.READONLY, self.SECRET)).start()
+        try:
+            self.assertEqual({t["name"] for t in client.list_tools()}, set(self.READONLY))
+            self.assertEqual(client.scope_info.get("scope_subject"), "repair")
+        finally:
+            client.close()
+
+    def test_write_call_is_rejected_by_server(self):
+        client = self._client(issue_scope_token("repair", self.READONLY, self.SECRET)).start()
+        try:
+            before = client.request_count
+            with self.assertRaises(McpError) as ctx:
+                client.call_tool("create_service_order",
+                                 {"item": "更换机油机滤", "preferred_date": "2099-06-18"})
+            self.assertEqual(ctx.exception.code, FORBIDDEN)
+            self.assertGreater(client.request_count, before, "请求必须到达服务端才被拒")
+        finally:
+            client.close()
+
+    def test_repair_advisor_answers_through_scope(self):
+        client = self._client(issue_scope_token("repair", self.READONLY, self.SECRET)).start()
+        try:
+            advisor = RepairAdvisor(client)
+            self.assertEqual(set(advisor.tools), set(self.READONLY))
+            result = advisor.ask("座椅加热怎么关闭")
+            self.assertEqual(result["status"], "answered")
+            self.assertTrue(result["citations"])
+        finally:
+            client.close()
 
 
 if __name__ == "__main__":

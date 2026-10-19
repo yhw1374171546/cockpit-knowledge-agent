@@ -76,13 +76,17 @@ python eval/run_all_tests.py
   test_offline.py                OK        28 项
   test_fc_pipeline.py            OK        20 项
   test_multiagent.py             OK        26 项
+  test_mcp.py                    OK        25 项
+  test_memory_longterm.py        OK        26 项
+  test_orders.py                 OK        23 项
+  test_answerability.py          OK        31 项
   test_vector_store.py           OK        10 项
-  test_sse.py                    OK        12 项
-  test_service.py                OK        72 项
+  test_sse.py                    OK        14 项
+  test_service.py                OK        77 项
   test_tasks_and_traces.py       OK        13 项
   test_migrations.py             OK         6 项
 ------------------------------------------------------------
-合计 253 项 ｜ 套件 10/10 通过
+合计 371 项 ｜ 套件 14/14 通过
 [OK] 全部通过
 ```
 
@@ -259,6 +263,43 @@ python eval/kb_versioning_demo.py
 
 ---
 
+## 5.5 三个新能力（各 30 秒，不需要 GPU）
+
+### 5.5.1 工单闭环：建单 → 跨会话改期 → 取消
+
+```powershell
+python eval/order_flow.py
+```
+
+**期望**：9/9 通过，最后一行是 `澄清轮次 ON 0 / OFF 2`。
+它做的事：会话 1 只说了「我一般去浦东店」+ 建单（**没说门店**）；关掉进程重开（模拟第二天），
+会话 2 只说「上次那个保养改个日期」——靠长期记忆捞到单号、改期成功、再取消。
+工单是真落库的（SQLite），不是内存里的假单。
+
+### 5.5.2 MCP：把工具搬到另一个进程（含服务端 scope 校验）
+
+```powershell
+python eval/mcp_smoke.py        # 7/7：握手 / schema 一致 / 白名单 / 两步确认 / trace
+python eval/mcp_scope.py        # 第二消费者：只读维修顾问拿不到写操作（服务端拒绝）
+python -m agent.mcp.server      # 单独起一个 MCP Server（stdio，Ctrl+C 退出）
+```
+
+前两个脚本用的是**同一个** `McpServer`；第二个用 scope token 把只读工具发出去，
+写操作**在服务端**被拒（不是客户端拦），日志里能看到 `-32001 forbidden`。
+
+### 5.5.3 长期记忆：关掉 vs 打开的 AB 对照
+
+```powershell
+python eval/memory_ab.py
+```
+
+**期望**：`跨会话召回率：记忆 ON 100% ｜ OFF 0%`、`误注入 0 条`、`负样本被注入 0/2`。
+用 `SpyPlanner` 抓 `AgentGraph` 真正发出的 messages，所以证的是"事实进了 prompt"，不是"我拼的字符串里有"。
+
+> 三个脚本跑完都不需要真实语料、不需要 GPU、不需要模型 API。
+
+---
+
 ## 6. 数据库迁移（改表结构时用）
 
 ```powershell
@@ -310,8 +351,11 @@ python -m alembic current                   # 看当前版本
 ├── agent/                    ← 主线代码
 │   ├── kb.py                 ★ RAG 底座：三策略解析 / 双路召回 / RRF / 精排 / 增量索引
 │   ├── graph.py              ★ Agent 状态机：Router→Planner→Executor→Reflector→Answer
-│   ├── tools.py              ★ 工具注册表（Function Calling schema / 白名单隔离）
-│   ├── memory.py             ★ 记忆与指代消解（错误继承 0%）
+│   ├── tools.py              ★ 工具注册表（Function Calling schema / 白名单隔离 / 工单工具）
+│   ├── orders.py             ★ 服务工单（SQLite + 状态机 + 幂等 + 跨用户隔离）
+│   ├── memory.py             ★ 会话记忆与指代消解（错误继承 0%）
+│   ├── longterm.py           ★ 长期记忆（情景/语义 + 写入·遗忘·冲突·脱敏）
+│   ├── mcp/                  ★ MCP 接入（手写 JSON-RPC over stdio + 服务端 scope token）
 │   ├── reflection.py         ★ 接地校验 + 引用三元组校验
 │   ├── cache.py              ★ 语义缓存（车况指纹 + 反义守卫）
 │   ├── vector_store.py       ★ 向量索引持久化 + 增量
@@ -319,11 +363,14 @@ python -m alembic current                   # 看当前版本
 │   ├── agents/               四个专家（手册 / 车控 / 服务 / 安全评审）
 │   ├── guardrails/           注入检测 / 策略引擎 / 预算
 │   ├── service/              ★ 服务层（FastAPI / SSE / 幂等 / 限流 / 任务队列 / 迁移）
-│   └── tests/                10 个测试套件（253 项）
+│   └── tests/                14 个测试套件（371 项）
 ├── eval/                     ← 评测与门禁
 │   ├── run_all_tests.py      ★ 一次跑完全部测试
 │   ├── ci_gate.py            ★ 指标门禁（退化即拦）
 │   ├── service_smoke.py      端到端冒烟（36 项）
+│   ├── mcp_smoke.py          MCP 跨进程冒烟（7/7）
+│   ├── order_flow.py         工单闭环（建单 → 跨会话改期 → 取消）
+│   ├── memory_ab.py          长期记忆 AB（记忆是否真在决策路径上）
 │   ├── cache_bench.py        语义缓存真实收益
 │   ├── kb_versioning_demo.py 换手册：灰度 + 回滚
 │   └── fixtures/             内置合成语料（克隆即可跑）
@@ -343,9 +390,12 @@ python -m alembic current                   # 看当前版本
 ```powershell
 # 不需要设任何编码环境变量（脚本自己处理；见第 0 节）
 python -m pip install -q -r requirements.txt
-python eval/run_all_tests.py           # 253 项全过
+python eval/run_all_tests.py           # 371 项全过
 python eval/ci_gate.py                 # 门禁 6/6
 python eval/ci_smoke.py                # 冒烟 10/10
+python eval/order_flow.py              # 工单闭环 9/9
+python eval/mcp_smoke.py               # MCP 跨进程 7/7
+python eval/memory_ab.py               # 记忆 AB：召回 0% → 100%
 python -m agent.run_agent "座椅加热怎么关闭"   # 能给出带页码的答案
 python -m alembic upgrade head --sql   # 迁移脚本可解析
 ```

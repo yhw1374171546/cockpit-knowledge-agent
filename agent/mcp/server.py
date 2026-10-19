@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional, Sequence
 from agent.kb import KnowledgeBase
 from agent.mcp.protocol import (
     CONTROL_TOOLS,
+    FORBIDDEN,
     INTERNAL_ERROR,
     INVALID_PARAMS,
     INVALID_REQUEST,
@@ -43,6 +44,7 @@ from agent.mcp.protocol import (
     make_error,
     make_result,
 )
+from agent.mcp.scope import ScopeTokenError, allowed_tools, verify_scope_token
 from agent.tools import TELEMETRY_PROFILES, VEHICLE_TELEMETRY, ToolRegistry, ToolResult
 
 
@@ -114,13 +116,18 @@ class McpServer:
     """一个 stdio MCP Server：单客户端、单线程、按行收发。"""
 
     def __init__(self, kb_path: Optional[str] = None, telemetry_profile: str = "normal",
-                 registry: Optional[ToolRegistry] = None):
+                 registry: Optional[ToolRegistry] = None, scope_secret: str = ""):
         self.kb_path = kb_path
         self.telemetry_profile = telemetry_profile
         self._registry = registry
         self.initialized = False
         self.calls_served = 0
         self.control_calls = 0
+        # 服务端鉴权：配置了 secret 就要求 initialize 带 scope token，之后按授权列表过滤工具
+        self.scope_secret = scope_secret
+        self.scope: Optional[tuple] = None
+        self.scope_subject = ""
+        self.scope_rejections = 0
 
     # ── 延迟构造 ──
     @property
@@ -165,14 +172,17 @@ class McpServer:
 
     def _dispatch(self, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
         if method == "initialize":
+            self._establish_scope(params)
             self.initialized = True
             return {
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {"tools": {"listChanged": False}},
                 "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
-                "instructions": ("座舱知识大脑工具服务：手册检索 / 实时车况 / 车型参数 / 保养计划 / 到店预约。"
-                                 "写操作（create_service_order）必须先经车主确认，"
+                "instructions": ("座舱知识大脑工具服务：手册检索 / 实时车况 / 车型参数 / 保养计划 / 工单。"
+                                 "写操作（建单/改期/取消）必须先经车主确认，"
                                  "客户端用控制面工具 confirm_action 传入 action_key 后才能执行。"),
+                "_meta": {"scope_subject": self.scope_subject,
+                          "tools": list(self.scope) if self.scope is not None else "all"},
             }
         if method in ("notifications/initialized", "initialized"):
             self.initialized = True
@@ -186,15 +196,40 @@ class McpServer:
         raise McpError(METHOD_NOT_FOUND, f"未知方法 {method}")
 
     # ── 工具清单 ──
+    def _establish_scope(self, params: Dict[str, Any]) -> None:
+        """配置了 secret 就必须带有效 token；token 决定这个连接能看/能调哪些工具。"""
+        if not self.scope_secret:
+            return                                  # 开发模式：不鉴权（全部工具）
+        meta = params.get("_meta")
+        token = meta.get("scope_token") if isinstance(meta, dict) else None
+        if not isinstance(token, str) or not token:
+            raise McpError(FORBIDDEN, "需要 scope_token：服务端已开启鉴权",
+                           {"hint": "在 initialize 的 params._meta.scope_token 里带签名 token"})
+        try:
+            payload = verify_scope_token(token, self.scope_secret)
+        except ScopeTokenError as exc:
+            raise McpError(FORBIDDEN, f"scope_token 无效：{exc}") from exc
+        self.scope = tuple(allowed_tools(payload))
+        self.scope_subject = str(payload.get("sub") or "")
+        log(f"scope 建立：subject={self.scope_subject} tools={list(self.scope)}")
+
+    def _visible_names(self) -> List[str]:
+        names = self.registry.names()
+        if self.scope is None:
+            return names
+        return [n for n in names if n in self.scope]
+
     def tool_descriptors(self) -> List[Dict[str, Any]]:
         """把 ToolRegistry 的 OpenAI schema 翻译成 MCP 的 `{name, description, inputSchema}`。
 
         复用同一份 `parameters` 很关键：MCP 与 Function Calling 描述的是**同一组工具**，
-        两份 schema 各写一次，迟早会漂移。
+        两份 schema 各写一次，迟早会漂移。配置了 scope 时**只返回被授权的工具**。
         """
         out: List[Dict[str, Any]] = []
         for spec in self.registry.tools.values():
             if spec.name in CONTROL_TOOLS:
+                continue
+            if self.scope is not None and spec.name not in self.scope:
                 continue
             function = spec.to_openai_schema()["function"]
             out.append({
@@ -230,6 +265,12 @@ class McpServer:
             self.registry.user_id = user_id
         started = time.perf_counter()
         try:
+            # 服务端鉴权：即使客户端不听话，也在这里挡住。这是"权限不能只在客户端"的落点。
+            if self.scope is not None and name not in self.scope:
+                self.scope_rejections += 1
+                log(f"scope 拒绝：subject={self.scope_subject} 尝试调用 {name}")
+                raise McpError(FORBIDDEN, f"scope 未授权工具 {name}",
+                               {"allowed": list(self.scope)})
             if name in CONTROL_TOOLS:
                 self.control_calls += 1
                 result = self._control(name, arguments)
@@ -237,7 +278,7 @@ class McpServer:
                                     server_ms=(time.perf_counter() - started) * 1000)
 
             if name not in self.registry.names():
-                raise McpError(INVALID_PARAMS, f"未知工具 {name}", {"tools": self.registry.names()})
+                raise McpError(INVALID_PARAMS, f"未知工具 {name}", {"tools": self._visible_names()})
 
             result = self.registry.call(name, arguments)
             self.calls_served += 1
@@ -284,6 +325,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--kb", default=None, help="知识库路径；缺省按 AGENT_KB_PATH 解析")
     parser.add_argument("--telemetry", default="normal", choices=sorted(TELEMETRY_PROFILES),
                         help="车况场景（演示数据）")
+    parser.add_argument("--scope-secret", default=os.environ.get("MCP_SCOPE_SECRET", ""),
+                        help="开启服务端鉴权：客户端 initialize 必须带以此密钥签发的 scope token")
     args = parser.parse_args(argv)
 
     for stream in (sys.stdout,):
@@ -294,13 +337,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             except Exception:                                    # noqa: BLE001
                 pass
 
-    log(f"启动 pid={os.getpid()} kb={args.kb or '<按环境解析>'} telemetry={args.telemetry}")
-    server = McpServer(kb_path=args.kb, telemetry_profile=args.telemetry)
+    log(f"启动 pid={os.getpid()} kb={args.kb or '<按环境解析>'} telemetry={args.telemetry}"
+        + (" 鉴权=on" if args.scope_secret else " 鉴权=off（开发模式）"))
+    server = McpServer(kb_path=args.kb, telemetry_profile=args.telemetry,
+                       scope_secret=args.scope_secret)
     try:
         server.serve()
     except KeyboardInterrupt:
         log("收到中断，退出")
-    log(f"退出：业务调用 {server.calls_served} 次，控制面调用 {server.control_calls} 次")
+    log(f"退出：业务调用 {server.calls_served} 次，控制面调用 {server.control_calls} 次，"
+        f"scope 拒绝 {server.scope_rejections} 次")
     return 0
 
 

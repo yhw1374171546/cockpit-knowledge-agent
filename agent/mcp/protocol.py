@@ -45,6 +45,10 @@ METHOD_NOT_FOUND = -32601
 INVALID_PARAMS = -32602
 INTERNAL_ERROR = -32603
 
+# 业务错误码（服务端鉴权）：scope token 无效 / 工具不在授权范围。
+# 为什么不用 HTTP 语义：stdio 没有状态码，只能靠 JSON-RPC error.code 表达。
+FORBIDDEN = -32001
+
 JsonRpcId = Union[int, str, None]
 
 

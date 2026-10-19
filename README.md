@@ -1,6 +1,6 @@
 # 🚗 智能座舱汽车知识大脑（Cockpit Knowledge Agent）
 
-> 🚀 **只想先跑起来？** 看 [QUICKSTART.md](QUICKSTART.md)（5 分钟：装依赖 → 253 项测试 → 单轮问答 → 起服务冒烟）。
+> 🚀 **只想先跑起来？** 看 [QUICKSTART.md](QUICKSTART.md)（5 分钟：装依赖 → 371 项测试 → 单轮问答 → 起服务冒烟 → 跑工单闭环）。
 > 这份 README 讲的是**为什么这么做**和**实测数据**。
 
 
@@ -11,12 +11,13 @@
 ![Python](https://img.shields.io/badge/Python-3.9%2B-3776AB?logo=python&logoColor=white)
 ![RAG](https://img.shields.io/badge/RAG-Hybrid%20Retrieval-1C3C3C)
 ![Multi-Agent](https://img.shields.io/badge/Multi--Agent-Supervisor-6E4AFF)
-![Function Calling](https://img.shields.io/badge/Function%20Calling-5%20tools-FF6F61)
+![Function Calling](https://img.shields.io/badge/Function%20Calling-8%20tools-FF6F61)
 ![LangGraph](https://img.shields.io/badge/LangGraph-StateGraph-1C3C3C)
 ![Guardrails](https://img.shields.io/badge/Guardrails-Injection%20Defense-critical)
 ![Service](https://img.shields.io/badge/Service-FastAPI%20%2B%20SSE-009688)
+![MCP](https://img.shields.io/badge/MCP-stdio%20%2B%20scope%20token-6E4AFF)
 ![vLLM](https://img.shields.io/badge/vLLM-PagedAttention-8A2BE2)
-![Tests](https://img.shields.io/badge/tests-139%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-371%20passed-brightgreen)
 ![CI](https://img.shields.io/badge/CI-Agent%20CI-blue)
 
 **核心结果（全部在本仓库可复现，非估算）**
@@ -27,15 +28,16 @@
 | 精排带来增益 | **+4.31 pt** | 双路+精排 0.9065 vs 最佳单路（仅向量）0.8634 |
 | 检索上下文覆盖率 | **0.8314 → 0.9059** | 覆盖率 +7.45 pt，同时上下文长度 −15.7% |
 | 端到端拒答准确率 | **0/2 → 2/2** | 定位并修复「拒答信号写错字段」缺陷后 |
-| **多 Agent 安全指令合规率** | **0% → 100%** | critical 车况场景必须给出停驶指令 |
-| **安全冲突检测率** | **0% → 100%** | 手册通用建议 vs 实时严重风险的仲裁 |
-| **注入攻击成功率（ASR）** | **40.91% → 2.27%** | 44 条对抗样本，攻击投递率 100% |
+| **多 Agent 增量** | **冲突检测 0% → 100%｜路由 100%** | 安全合规单 Agent 加硬门控**也能 100%**，所以不把合规算多 Agent 的增量；增量是冲突仲裁与工具隔离 |
+| **注入攻击成功率（ASR）** | **40.91% → 2.27%** | 44 条对抗样本，攻击投递率 100%，良性误杀 0% |
 | 工具过度调用率 | **100% → 7.14%** | 补上「不该调工具就不调」的判定 |
-| 首字延迟 TTFT（P50） | **614 ms → 14 ms** | 流式输出；**已接进服务链路**的语义缓存命中时归零 |
+| 编排层耗时（P50） | **14 ms（真实测量）** | 路由 / 检索 / 缓存 / 反思；生成侧本机无 GPU，是**参数化模拟**（4 ms/token），真实 TTFT 取决于推理引擎 |
 | 知识库规模 | **9,301 块 / 579 万字** | 页码元数据覆盖 **100%** |
 | **服务化** | **FastAPI + SSE + 幂等落库** | 鉴权/租户/限流/配额/审计；真实 HTTP 冒烟 **36/36** |
-| **工具接入** | **MCP Server（stdio）** | 5 个工具 + 客户端白名单 / 跨进程确认 / trace 透传；`eval/mcp_smoke.py` **7/7** |
-| 测试 | **139 passed** | 5 套测试（含 29 项服务接口测试），完整/迷你语料双模式 |
+| **工具接入（MCP）** | **8 个工具｜stdio + scope token** | 客户端白名单 + **服务端 scope 校验**；跨进程写操作两步确认、`trace_id` 透传；`eval/mcp_smoke.py` **7/7** |
+| **工单闭环** | **9/9｜澄清轮次 2 → 0** | 建单 → 跨会话改期 → 取消（SQLite 落库、幂等、跨用户隔离）；`eval/order_flow.py` |
+| **长期记忆** | **召回 0% → 100%** | 情景/语义两层；AB 对照（抓 AgentGraph 实发 messages），误注入 0、负样本 0/2 |
+| 测试 | **371 项 / 14 套** | 完整语料与迷你语料双模式可跑，`eval/run_all_tests.py` 一次跑全 |
 
 ---
 
@@ -297,10 +299,12 @@ python agent/tests/test_service.py     # → Ran 29 tests, OK（服务层接口�
 │   │   ├── security.py           #     限流 / 配额 / 幂等 / 确认 / 审计
 │   │   ├── schemas.py            #     Pydantic 契约（自动生成 OpenAPI）
 │   │   └── app.py                #     FastAPI 应用（SSE/RBAC/健康检查/治理接口）
+│   ├── orders.py                 #   ★ 服务工单（SQLite + 状态机 + 幂等 + 跨用户隔离）
+│   ├── longterm.py               #   ★ 长期记忆（情景/语义 + 写入·遗忘·冲突·脱敏）
 │   ├── memory.py / reflection.py / graph.py / tools.py
-│   ├── run_agent.py              #   CLI（单轮 / 多轮 / 多 Agent / 车况场景 / 接 vLLM）
+│   ├── run_agent.py              #   CLI（单轮 / 多轮 / 多 Agent / 车况场景 / 长期记忆 / 接 vLLM）
 │   ├── eval_agent.py             #   103 题 Agent 评测 + 阈值扫描
-│   └── tests/                    #   5 套测试（139 项，含服务接口测试）
+│   └── tests/                    #   14 套测试（371 项，含服务接口与跨进程测试）
 ├── kb/                           # ★ 知识库构建（三策略重建 + 页码对齐对照）
 ├── eval/                         # ★ 评测与门禁
 │   ├── evaluate.py               #   四路消融 + 检索侧指标
@@ -310,7 +314,10 @@ python agent/tests/test_service.py     # → Ran 29 tests, OK（服务层接口�
 │   ├── multiagent_eval.py        #   多 Agent vs 单 Agent 对比
 │   ├── ttft_bench.py             #   首字延迟 + 语义缓存
 │   ├── vector_rerank_eval.py     #   向量路 + RRF + 精排（需 GPU）
-│   ├── service_smoke.py          #   ★ 服务层真实 HTTP+SSE 冒烟（33 项检查）
+│   ├── service_smoke.py          #   ★ 服务层真实 HTTP+SSE 冒烟（36 项检查）
+│   ├── mcp_smoke.py              #   ★ MCP 跨进程冒烟（握手/白名单/确认/trace）
+│   ├── order_flow.py             #   ★ 工单闭环（建单 → 跨会话改期 → 取消）
+│   ├── memory_ab.py              #   ★ 长期记忆 AB（记忆是否真在决策路径上）
 │   ├── ci_gate.py / ci_smoke.py  #   ★ 指标门禁 + 无数据冒烟
 │   ├── thresholds.json           #   ★ 门禁阈值（入库）
 │   └── fixtures/mini_corpus.jsonl #  ★ 迷你语料（入库，CI 用）
@@ -1242,6 +1249,26 @@ MCP（Model Context Protocol）解决的正是"工具怎么标准化接进来"�
 **边界（不夸大）**：只实现 tools 能力，没有 resources / prompts / sampling；传输只有 stdio，
 没有 streamable HTTP 与连接池；车况与保养数据仍是内置演示数据，**真实车控 API 没有接**——
 所以这节能证明的是**协议与治理**，不是"打通了车云"。
+
+### 20.3 第二消费者 + 服务端 scope token（让"复用"变成事实）
+
+> `python eval/mcp_scope.py`（6/6）｜`python -m agent.repair_advisor --secret <S> "座椅加热怎么关闭"`
+
+前一版 MCP 只有一个客户端，所以"供多个 Agent 复用"只是潜力。现在补上第二方：
+
+- **服务端鉴权**：Server 用 `--scope-secret` 启动后，不带 token 的连接在 `initialize` 阶段就被拒（`-32001`）。
+  token 是 HMAC 自签的 `{sub, tools, exp}`（`agent/mcp/scope.py`），不是 OAuth——边界写在模块注释里。
+- **工具级授权**：`tools/list` 只返回被授权的工具。只读 token 看到 **4 个**（检索 / 保养 / 工单查询 / 车况），
+  全量 token 看到 **8 个**——同一份 schema、两种权限。
+- **越权在服务端被拒**：只读客户端硬编码去调 `create_service_order`，服务端返回 `-32001`；
+  测试断言的是"请求**到达了**服务端才被拒"（`request_count` 增加），与第二十节"白名单拦在客户端
+  → 服务端请求数不变"正好互补。
+- **维修顾问**（`agent/repair_advisor.py`）用只读 token 接同一套工具，复用同一个 `AgentGraph`，
+  能答出带页码的手册问题。
+
+**边界**：stdio 传输是单客户端的，所以两个 Agent 各自拉起一个 server 进程，
+共用的是**同一份工具实现与定义**（同一入口、同一 `ToolRegistry`），不是"一个进程服务多客户端"
+——后者需要 HTTP/SSE 传输，未实现；scope token 也不做撤销列表。
 
 ## 二十一、长期记忆：从"会话内 6 轮"到"跨会话记得住"
 

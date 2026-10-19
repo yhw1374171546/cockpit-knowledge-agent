@@ -79,6 +79,11 @@ jobs:
           AGENT_KB_PATH: eval/fixtures/mini_corpus.jsonl
         run: python agent/tests/test_mcp.py
 
+      - name: MCP scope + second consumer (服务端鉴权 / 只读维修顾问)
+        env:
+          AGENT_KB_PATH: eval/fixtures/mini_corpus.jsonl
+        run: python eval/mcp_scope.py
+
       - name: Long-term memory (写入策略 / 冲突 / 遗忘 / 脱敏 / 召回)
         run: python agent/tests/test_memory_longterm.py
 

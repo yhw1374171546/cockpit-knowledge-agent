@@ -46,12 +46,15 @@ class McpClient:
                  args: Optional[Sequence[str]] = None,
                  timeout: float = 30.0,
                  cwd: Optional[str] = None,
-                 env: Optional[Dict[str, str]] = None):
+                 env: Optional[Dict[str, str]] = None,
+                 scope_token: str = ""):
         base = list(command) if command else list(DEFAULT_COMMAND)
         self.command: List[str] = base + list(args or [])
         self.timeout = timeout
         self.cwd = cwd or ROOT
         self._env_overrides = dict(env or {})
+        # 服务端开启鉴权时，必须在 initialize 里带上它；不带的连接会被直接拒绝
+        self.scope_token = scope_token
         self._proc: Optional[subprocess.Popen] = None
         self._responses: "queue.Queue[Optional[Dict[str, Any]]]" = queue.Queue()
         self._stderr: Deque[str] = deque(maxlen=50)
@@ -62,6 +65,7 @@ class McpClient:
         self.request_count = 0
         self.timed_out = 0
         self.server_info: Dict[str, Any] = {}
+        self.scope_info: Dict[str, Any] = {}
         self.protocol_version = ""
 
     # ── 生命周期 ──
@@ -83,17 +87,27 @@ class McpClient:
         self._err_reader = threading.Thread(target=self._stderr_loop, name="mcp-stderr", daemon=True)
         self._reader.start()
         self._err_reader.start()
-        self._handshake()
+        try:
+            self._handshake()
+        except Exception:
+            # 鉴权失败/服务端拒绝握手：别把子进程与线程留在那里
+            self.close()
+            raise
         return self
 
     def _handshake(self) -> None:
-        result = self.request("initialize", {
+        params: Dict[str, Any] = {
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {"tools": {}},
             "clientInfo": {"name": "cockpit-knowledge-agent", "version": "1.0.0"},
-        })
+        }
+        if self.scope_token:
+            params["_meta"] = {"scope_token": self.scope_token}
+        result = self.request("initialize", params)
         self.protocol_version = str(result.get("protocolVersion") or "")
         self.server_info = dict(result.get("serverInfo") or {})
+        # 服务端回报的授权范围（subject + 工具白名单），用于日志与断言
+        self.scope_info = dict(result.get("_meta") or {})
         self.notify("notifications/initialized")
 
     def close(self) -> None:
