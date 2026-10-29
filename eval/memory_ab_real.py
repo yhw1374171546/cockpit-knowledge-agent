@@ -21,11 +21,13 @@
 
 如实说明
 --------
-- 场景 1 里的"默认门店"是**桩数据**（`OrderStore.create` 的兜底门店），
+- 场景 1/2 里的"默认门店"是**桩数据**（`OrderStore.create` 的兜底门店），
   所以 OFF 侧不是一定失败，而是**门店会填错**——这恰好是记忆该解决的错；
-- 写操作仍走"二次确认"：单号对、进入 `needs_confirmation` 就算"模型定位对了"，
-  真正的确认由产品流程完成（不在这里替它点确认）；
-- 这里只跑 4 个场景 × 2 组，**样本小**，结论是"方向性证据"，不是统计显著性。
+- 写操作场景（1/2/3/5）按真实产品流程跑**确认循环（最多 3 轮）**：尝试 → 被拦
+  （needs_confirmation）→ 按实际参数补确认键 → 用户"确认" → 重试办成；
+  单轮评测曾把"模型违反系统提示词直接下单"误奖为成功（早期 pref_store 的 3/3 即此类），
+  确认循环修正了这一点；
+- 这里只跑 5 个场景 × 2 组，**样本小**，结论是"方向性证据"，不是统计显著性。
 """
 
 from __future__ import annotations
@@ -38,6 +40,7 @@ import shutil
 import sys
 import tempfile
 from dataclasses import dataclass
+from datetime import date, timedelta
 from typing import Any, Callable, Dict, List, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -67,9 +70,12 @@ from eval.llm_backend import (  # noqa: E402
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 USER = "u1"
 ITEM = "更换机油机滤"
-ORDER_DATE = "2099-06-18"
-ORDER_DATE2 = "2099-06-25"
-NEW_DATE = "2099-07-01"
+# 用相对"今天"的真实未来日期，而不是 2099 年的固定日期：deepseek-flash 会把 2099 年
+# 判成"距今 70 多年的笔误"并拒绝继续（pref_store2 ON 0/3 的第三层根因）。
+# 日期不真实时，评测测的是模型的日期洁癖，不是长期记忆。
+ORDER_DATE = (date.today() + timedelta(days=3)).isoformat()
+ORDER_DATE2 = (date.today() + timedelta(days=5)).isoformat()
+NEW_DATE = (date.today() + timedelta(days=7)).isoformat()
 # 两家门店都故意与 OrderStore 的兜底门店（浦东金桥店）不同，这样"门店对不对"可判
 CENTER = "领克中心(徐汇店)"
 CENTER2 = "领克中心(杭州西湖店)"
@@ -89,6 +95,7 @@ class Scenario:
     need_order: bool = False          # 昨天有没有建过单
     query: str = ""                   # 今天说的话
     note: str = ""
+    order_date: str = ORDER_DATE      # 本场景"今天"要预约的日期（预置确认键必须与 query 一致）
     # 用户"已经点过确认"的写操作键（评测里预置，避免把二次确认当成失败）：
     # 可用的占位符 {item} {date} {new_date} {order_id}
     confirm_template: str = ""
@@ -138,6 +145,7 @@ SCENARIOS: List[Scenario] = [
     Scenario("pref_store2", seed_text=f"我一般去{CENTER2}，以后都去这家",
              query=f"帮我约 {ORDER_DATE2} 到店保养，换机油机滤。我已经确认过了，直接办。",
              note="门店偏好（杭州）",
+             order_date=ORDER_DATE2,
              confirm_template="create_service_order:{item}:{date}",
              redundant_pattern=ASK_FOR_STORE,
              check=_pref_store_check(CENTER2)),
@@ -199,9 +207,13 @@ def run_case(scenario: Scenario, use_memory: bool, llm: Any, kb: Any,
         )
         # 写操作需要车主确认：评测里把"用户已确认"预置好（两种条件完全一致），
         # 否则会把"确认流程"误判成"任务失败"。
+        # 注意：确认键里的日期必须用**本场景的 order_date**，与 query 的日期一致；
+        # 早前版本统一用 ORDER_DATE，导致 pref_store2（约 06-25）预确认的是 06-18，
+        # 工具端按实际日期生成的 action_key 匹配不上 → 永远落在"需二次确认"→ ON 假性 0/3。
         if scenario.confirm_template:
             action_key = scenario.confirm_template.format(
-                item=ITEM, date=ORDER_DATE, new_date=NEW_DATE, order_id=order_id)
+                item=ITEM, date=scenario.order_date or ORDER_DATE,
+                new_date=NEW_DATE, order_id=order_id)
             registry.confirm(action_key)
         memory = ConversationMemory()
         if store is not None:
@@ -214,21 +226,56 @@ def run_case(scenario: Scenario, use_memory: bool, llm: Any, kb: Any,
                                               refuse_on_insufficient=False,
                                               enable_reflection=False),
                            memory=memory, agent_name="ab")
-        state = graph.run(scenario.query)
-        payload = state.to_dict()
-        payload["status"] = state.status
-        answer_text = str(state.answer or "")
-        asked = bool(ASK_PATTERN.search(answer_text))
-        redundant = bool(scenario.redundant_pattern.search(answer_text)) \
+        states = [graph.run(scenario.query)]
+        # ── 写操作场景的多轮确认：对齐真实产品流程（尝试 → 拦下 → 确认 → 重试）──
+        # 产品路径：agent 调写工具 → 未确认被拦（needs_confirmation）→ 客户端拿
+        # action_key 调 /v1/writes/confirm → agent 重跑办成。单轮评测只能奖励
+        # "模型违反系统提示词直接下单"的运气行为（早期 pref_store 的 3/3 即此类，
+        # 不可复现、也不该鼓励），所以这里改为最多 3 轮的确认循环：
+        #   1) 每次跑完，把被拦下的写调用按**模型实际参数**补进 confirmed_actions——
+        #      模型会把"换机油机滤"扩展成保养全项列表，确认键必须跟着实际参数走，
+        #      否则 exact-match 的键永远对不上（pref_store2 0/3 的第四层根因）；
+        #   2) 已办成（check 通过）就停；否则用户说"确认"再跑一轮；
+        #   3) 记忆的收益体现在：任何一轮都不该再追问门店/单号（redundant），
+        #      而不是"省掉确认轮"——确认轮是产品规则，不是记忆的失职。
+        if scenario.confirm_template:
+            for _ in range(3):
+                for call in states[-1].tool_calls:
+                    name = call.get("tool") or ""
+                    if name not in ("create_service_order", "reschedule_order", "cancel_order"):
+                        continue
+                    args = call.get("arguments") or {}
+                    if name == "create_service_order":
+                        key = f"create_service_order:{args.get('item')}:{args.get('preferred_date')}"
+                    else:
+                        key = f"{name}:{args.get('order_id')}:{args.get('new_date')}"
+                    registry.confirm(key)
+                ok_now = bool(scenario.check(states[-1].to_dict(), orders, order_id)) \
+                    if scenario.check else True
+                if ok_now:
+                    break
+                states.append(graph.run("确认，就按刚才说的办"))
+        final = states[-1]
+        payload = final.to_dict()
+        payload["status"] = final.status
+        answers = [str(s.answer or "") for s in states]
+        asked = any(bool(ASK_PATTERN.search(a)) for a in answers)
+        redundant = any(bool(scenario.redundant_pattern.search(a)) for a in answers) \
             if scenario.redundant_pattern is not None else False
         return {
             "state": payload,
             "success": bool(scenario.check(payload, orders, order_id)) if scenario.check else False,
             "asked_user": asked,
             "asked_redundant": redundant,
-            "tool_calls": len(state.tool_calls),
-            "tokens": state.tokens_total,
-            "answer": answer_text[:200],
+            "tool_calls": sum(len(s.tool_calls) for s in states),
+            "tokens": sum(s.tokens_total for s in states),
+            "answer": "\n\n".join(answers)[:320],
+            # 逐轮明细：失败归因要靠它——"最后一轮到底调没调工具、参数是什么"。
+            "turns": [{"status": s.status,
+                       "calls": [{"tool": c.get("tool"), "ok": c.get("ok"),
+                                  "args": c.get("arguments"),
+                                  "error": str(c.get("error"))[:80]} for c in s.tool_calls],
+                       "answer": str(s.answer or "")[:200]} for s in states],
         }
     finally:
         orders.close()
@@ -240,6 +287,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="真模型的记忆答案层 AB")
     add_llm_args(ap)
     ap.add_argument("--limit", type=int, default=0, help="只跑前 N 个场景（省钱验链路用）")
+    ap.add_argument("--sid", default="", help="只跑指定场景 id（如 pref_store2），留空跑全部")
     ap.add_argument("--repeat", type=int, default=2,
                     help="每个条件重复跑几次（模型有随机性，单次不足以判断）")
     ap.add_argument("--json-out", default=os.path.join(ROOT, "eval", "memory_ab_real.json"))
@@ -248,6 +296,11 @@ def main() -> int:
     kb = KnowledgeBase.load(FIXTURE_KB if os.path.exists(FIXTURE_KB) else None)
     llm = make_llm(args, known_tools=ToolRegistry(kb).names())
     scenarios = SCENARIOS[:args.limit] if args.limit else SCENARIOS
+    if args.sid:
+        scenarios = [s for s in scenarios if s.sid == args.sid]
+        if not scenarios:
+            print(f"[!] 没有场景 {args.sid}；可用：{[s.sid for s in SCENARIOS]}")
+            return 2
     tmp = tempfile.mkdtemp(prefix="mem-ab-real-")
 
     print("=" * 78)
@@ -292,7 +345,9 @@ def main() -> int:
         rows.append({"scenario": scenario.sid, "note": scenario.note, "order_id": order_id,
                      "repeats": repeats, **agg,
                      "samples": {"on": [i["answer"][:160] for i in results["on"]],
-                                 "off": [i["answer"][:160] for i in results["off"]]}})
+                                 "off": [i["answer"][:160] for i in results["off"]]},
+                     "details": {"on": [i["turns"] for i in results["on"]],
+                                 "off": [i["turns"] for i in results["off"]]}})
         print(f"\n  [{scenario.sid}] {scenario.note}（{repeats} 次）")
         for name, data in (("ON ", agg["on"]), ("OFF", agg["off"])):
             print(f"    {name} 一次办成 {data['success_rate']:.0%} ｜ "
