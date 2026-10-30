@@ -34,13 +34,17 @@ JUDGE_PROMPT = """你是座舱记忆问答的裁判。判断助手回答是否�
 VERDICT_RE = re.compile(r"VERDICT:\s*(yes|no)", re.IGNORECASE)
 
 
-def judge(llm: Any, qtype: str, question: str, gold: str, answer: str) -> Dict[str, Any]:
+def judge(llm: Any, qtype: str, question: str, gold: str, answer: str,
+          extra_note: str = "") -> Dict[str, Any]:
     """用 LLM 判定一道题；返回 {verdict, reason, raw}。
 
-    `llm` 是任何实现 `chat(messages, temperature=..., max_tokens=...)` 的后端
-    （DeepSeek/vLLM/ScriptedLLM 均可——测试用 ScriptedLLM 确定性回放）。
+    `extra_note`：题目自带的判定说明（如"接受简称"）——必须传给 judge，
+    否则会出现假阴性（实测：答案"领克08"对 gold"领克08 EM-P"被判 no）。
+    `llm` 是任何实现 `chat(messages, temperature=..., max_tokens=...)` 的后端。
     """
     note = TYPE_NOTES.get(qtype, TYPE_NOTES["IE"])
+    if extra_note:
+        note = note + "；本题补充：" + extra_note
     prompt = JUDGE_PROMPT.format(type_note=note, question=question, gold=gold, answer=answer)
     resp = llm.chat([{"role": "user", "content": prompt}],
                     temperature=0.0, max_tokens=256)

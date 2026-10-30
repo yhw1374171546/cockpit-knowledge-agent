@@ -62,27 +62,41 @@ def evaluate_sample(backend: MemoryBackend, sample: Sample) -> List[Dict[str, An
         if q.qtype == "TR":
             hist = backend.history("usual_center")
             hit = bool(center_golds) and set(_norm(v) for v in center_golds) <= {_norm(h) for h in hist}
+            row = {"sid": sample.sid, "qid": q.qid, "qtype": q.qtype,
+                   "question": q.text, "gold": q.gold, "hit": hit, "clean": hit}
         else:
             ctx = backend.context_text(q.text)
             hit = value_hit(q.gold, ctx)
-        rows.append({"sid": sample.sid, "qid": q.qid, "qtype": q.qtype,
-                     "question": q.text, "gold": q.gold, "hit": hit})
+            # KU 干净率：最新值在**画像区**里，且旧值不在画像区。
+            # 注意：只查"相关历史"之前的画像区——历史工单在旧门店办理是合法历史信息，
+            # 不该算脏（mem0 语义档没有分区，整段都是平铺事实 → 旧值混在里面即算脏）。
+            clean = hit
+            if q.qtype == "KU" and len(center_golds) >= 2:
+                profile_ctx = ctx.split("相关历史", 1)[0]
+                clean = hit and not value_hit(center_golds[0], profile_ctx)
+            row = {"sid": sample.sid, "qid": q.qid, "qtype": q.qtype,
+                   "question": q.text, "gold": q.gold, "hit": hit, "clean": clean}
+        rows.append(row)
     return rows
 
 
 def run_recall(samples: List[Sample], profile: str,
-               embedder: Any = None) -> Dict[str, Any]:
+               embedder: Any = None, llm: Any = None) -> Dict[str, Any]:
     rows: List[Dict[str, Any]] = []
     constraint_hits = 0
+    # 红线注入检查：三个无关查询的上下文**都必须**含红线——v2 是设计保证（无条件注入），
+    # mem0 语义档靠相似度运气（偶尔命中），v1 无此概念。
+    NEUTRAL_QUERIES = ("今天天气怎么样", "讲个笑话", "你好")
     for sample in samples:
         with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
             path = tmp.name
-        backend = make_backend(profile, path, embedder)
+        backend = make_backend(profile, path, embedder, llm=llm)
         try:
             ingest(backend, sample)
             rows.extend(evaluate_sample(backend, sample))
             redline = sample.profile_card.get("redline", "")
-            if redline and value_hit(redline, backend.context_text("今天天气怎么样")):
+            if redline and all(
+                    value_hit(redline, backend.context_text(q)) for q in NEUTRAL_QUERIES):
                 constraint_hits += 1
         finally:
             backend.close()
@@ -92,17 +106,22 @@ def run_recall(samples: List[Sample], profile: str,
                 pass
 
     by_type: Dict[str, Dict[str, Any]] = {}
+    ku_rows: List[Dict[str, Any]] = []
     for r in rows:
         t = by_type.setdefault(r["qtype"], {"n": 0, "hit": 0})
         t["n"] += 1
         t["hit"] += 1 if r["hit"] else 0
+        if r["qtype"] == "KU":
+            ku_rows.append(r)
     for t, v in by_type.items():
         v["rate"] = round(v["hit"] / max(1, v["n"]), 4)
+    ku_clean = round(sum(1 for r in ku_rows if r["clean"]) / max(1, len(ku_rows)), 4)
     total = {"n": len(rows), "hit": sum(1 for r in rows if r["hit"])}
     return {"profile": profile, "samples": len(samples),
             "by_type": by_type,
             "overall": {"n": total["n"], "hit": total["hit"],
                         "rate": round(total["hit"] / max(1, total["n"]), 4)},
+            "ku_clean": {"n": len(ku_rows), "rate": ku_clean},
             "constraint_injection": {"n": len(samples), "hit": constraint_hits,
                                      "rate": round(constraint_hits / max(1, len(samples)), 4)},
             "rows": rows}
@@ -120,22 +139,34 @@ def render_md(results: Dict[str, Dict[str, Any]]) -> str:
         lines.append(f"| {profile} | {res['samples']} | {res['overall']['n']} | "
                      f"{res['overall']['hit']} | **{res['overall']['rate']:.1%}** | "
                      f"{res['constraint_injection']['rate']:.1%} |")
-    lines += ["\n## 2. 按题型\n", "| 后端 | IE | MR | KU | TR |", "| --- | --- | --- | --- | --- |"]
+    lines += ["\n## 2. 按题型\n",
+              "| 后端 | IE | MR | KU | KU干净 | TR |",
+              "| --- | --- | --- | --- | --- | --- |"]
     for profile, res in results.items():
         bt = res["by_type"]
-        lines.append("| " + profile + " | " + " | ".join(
-            f"{bt.get(t, {}).get('rate', 0):.1%}" for t in ("IE", "MR", "KU", "TR")) + " |")
+        row = [f"{bt.get(t, {}).get('rate', 0):.1%}" for t in ("IE", "MR", "KU")]
+        row.append(f"{res['ku_clean']['rate']:.1%}")
+        row.append(f"{bt.get('TR', {}).get('rate', 0):.1%}")
+        lines.append("| " + profile + " | " + " | ".join(row) + " |")
     lines += ["\n## 3. 口径说明\n",
               "- TR：v1 的 overwrite 不保留旧值，`history()` 如实返回空 → TR 必然失败；"
               "这是 v1/v2 的已知差异，不是评测 bug。",
-              "- ABS（拒答）与答案层指标见 `judge.py`，检索层不适用。"]
+              "- KU 干净率：最新值在上下文且**旧值不在**。ADD-only 后端（mem0 语义档）"
+              "会把新旧值一起返回 → 干净率低，答案层会被旧值干扰。",
+              "- mem0 语义档 = 按 Mem0 公开语义的本地复现（ADD-only + 无业务 schema +"
+              " 无冲突消解 + threshold=0.1），**不是 Mem0 产品调用**——用来回答"
+              "'如果开箱用会发生什么'。",
+              "- ABS（拒答）与答案层指标见 `answer_runner.py` / `judge.py`，检索层不适用。"]
     return "\n".join(lines) + "\n"
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="记忆检索层 benchmark（离线、CI 可跑）")
     ap.add_argument("--jsonl", default=DEFAULT_JSONL, help="评测集路径")
-    ap.add_argument("--profile", choices=["v1", "v2", "both"], default="both")
+    ap.add_argument("--profile", choices=["v1", "v2", "mem0", "both"], default="both")
+    ap.add_argument("--llm-extract", action="store_true",
+                    help="v2 用 LLM 结构化抽取（v0.2 润色集必开；需要 --provider）")
+    ap.add_argument("--provider", default="deepseek", help="--llm-extract 时生效")
     ap.add_argument("--limit", type=int, default=0, help="只跑前 N 个样本（快速验证）")
     ap.add_argument("--embedding", action="store_true",
                     help="v2 启用 ONNX 嵌入（默认词面兜底；嵌入需 407MB 模型）")
@@ -155,11 +186,15 @@ def main() -> int:
 
     from eval.memory_backends import LocalEmbedder
     embedder = LocalEmbedder() if args.embedding else None
+    llm = None
+    if args.llm_extract:
+        from eval.llm_backend import make_llm
+        llm = make_llm(args)
 
-    profiles = ["v1", "v2"] if args.profile == "both" else [args.profile]
+    profiles = ["v1", "mem0", "v2"] if args.profile == "both" else [args.profile]
     results: Dict[str, Dict[str, Any]] = {}
     for profile in profiles:
-        res = run_recall(samples, profile, embedder)
+        res = run_recall(samples, profile, embedder, llm=llm)
         results[profile] = res
         print(f"[{profile}] 总召回 {res['overall']['rate']:.1%} ｜ 题型 "
               + " ".join(f"{k}={v['rate']:.0%}" for k, v in res["by_type"].items())

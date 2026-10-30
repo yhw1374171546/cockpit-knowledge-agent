@@ -45,6 +45,10 @@ CUES: Dict[str, Tuple[str, ...]] = {
 # 季节词（季节偏好的"休眠/复活"依据）
 SEASON_WORDS = ("夏天", "夏季", "冬天", "冬季", "秋天", "秋季", "春天", "春季", "高温", "低温", "天热", "天冷")
 
+# 时间推理查询的触发词：命中时把**失效历史**也注入上下文（"最初/后来/改没改"类问题
+# 光给当前值答不了——TR 题型在答案层的实测失败就是这么暴露的）。
+TEMPORAL_WORDS = ("最初", "最早", "后来", "之前", "以前", "改过", "改成", "换成", "有没有改", "改没改", "先", "当时")
+
 
 @dataclass
 class MemoryItem:
@@ -69,10 +73,13 @@ class MemoryContext:
         prefs = [i for i in self.items if i.kind == "semantic"]
         reds = [i for i in self.items if i.kind == "constraint"]
         eps = [i for i in self.items if i.kind == "episode"]
+        hist = [i for i in self.items if i.kind == "history"]
         lines = ["【跨会话记忆】"]
         if prefs:
             lines.append("- 车主画像：" + "；".join(
                 f"{i.meta.get('label', i.key)}={i.text}" for i in prefs))
+        if hist:
+            lines.append("- 演化史：" + "；".join(i.text for i in hist))
         if eps:
             lines.append("- 相关历史：" + "；".join(i.text for i in eps))
         if reds:
@@ -330,6 +337,16 @@ def retrieve(query: str, store: ProfileStore, user_id: str = "default",
     eps = [i for i in ctx.items if i.kind == "episode"]
     eps.sort(key=lambda i: -i.score)
     ctx.items = [i for i in ctx.items if i.kind != "episode"] + eps[:2]
+    # ── 时间推理查询：注入失效历史（TR 题型："最初去哪家→后来改没改"）──
+    if any(w in query for w in TEMPORAL_WORDS):
+        for key in ("usual_center",):
+            for fact in store.history(user_id, key):
+                if fact.t_invalid is None:
+                    continue                     # 当前值已在画像区，不重复
+                stamp = time.strftime("%m-%d", time.localtime(fact.t_valid))
+                ctx.items.append(MemoryItem(
+                    "history", key, f"{stamp} 曾设为 {fact.value}", 0.0,
+                    {"label": spec_for(key).label, "source": fact.source}))
     return ctx
 
 

@@ -94,12 +94,34 @@ def extract_rules(text: str) -> List[MemoryCandidate]:
 
 # ── LLM 结构化抽取 ────────────────────────────────────────────────────
 
-EXTRACT_PROMPT = """你是座舱车主画像的抽取器。从车主的**这句话**里抽取可以长期记住的事实，
+EXTRACT_PROMPT = """你是座舱车主画像的抽取器。从车主的**这句话**里抽取可以长期记住的事实，并以 JSON 格式输出（{"facts": [...]}）。
 只抽用户**明说**的（source=user_explicit）；从上下文明显能推断的才标 inferred（极少用）。
 规则：
 1. 只抽能改善后续服务的事实：车型、牌照区域、常住城市、惯用门店、功能偏好、车主红线；
 2. evidence_span 必须**逐字摘录**原文片段，禁止改写或拼接；
 3. 抽不到就返回空 facts 数组，绝不编造。"""
+
+
+# 模型常把 schema 里的 "key" 写成 "type" 并用中文标签（实测 deepseek-flash 即如此），
+# 解析层做别名映射——这是真实模型对接的典型坑：约束 schema 是提示，不是保证。
+KEY_ALIASES = {
+    "车型": "vehicle_model", "车辆型号": "vehicle_model", "model": "vehicle_model",
+    "牌照": "plate_region", "牌照区域": "plate_region", "车牌": "plate_region",
+    "常住城市": "city", "城市": "city", "居住地": "city",
+    "惯用门店": "usual_center", "常用门店": "usual_center", "门店": "usual_center",
+    "preferred_service_center": "usual_center", "preferred_center": "usual_center",
+    "下次保养": "next_due", "保养轨迹": "maintenance_history",
+    "车主红线": "do_not", "红线": "do_not", "禁忌": "do_not",
+}
+
+
+def _canonical_key(raw_key: str) -> str:
+    key = (raw_key or "").strip()
+    if not key:
+        return ""
+    if key.startswith("pref:"):
+        return key
+    return KEY_ALIASES.get(key, key)
 
 
 def extract_with_llm(text: str, llm: Any) -> List[MemoryCandidate]:
@@ -124,9 +146,9 @@ def extract_with_llm(text: str, llm: Any) -> List[MemoryCandidate]:
     for item in facts:
         if not isinstance(item, dict):
             continue
-        key = str(item.get("key") or "").strip()
-        value = str(item.get("value") or "").strip()
-        span = str(item.get("evidence_span") or "").strip()
+        key = _canonical_key(str(item.get("key") or item.get("type") or ""))
+        value = str(item.get("value") or item.get("content") or "").strip()
+        span = str(item.get("evidence_span") or item.get("evidence") or "").strip()
         source = "inferred" if item.get("source") == "inferred" else "user_explicit"
         # 依据定位硬校验：候选必须能在原文找到出处，否则是幻觉，直接丢弃
         if not key or not value or span not in text:

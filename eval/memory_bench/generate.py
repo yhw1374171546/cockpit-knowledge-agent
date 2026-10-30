@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 from datetime import date, timedelta
 from typing import Any, Dict, List, Tuple
@@ -26,7 +27,51 @@ from eval.memory_bench.schema import Question, Sample, Turn, save_jsonl, stats  
 OUT_JSONL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bench_v0.1.jsonl")
 
 
-def build_sample(card: Dict[str, Any], idx: int) -> Sample:
+def _norm(text: str) -> str:
+    return re.sub(r"\s+", "", (text or "")).replace("EM-P", "")
+
+
+def _model_core(model: str) -> str:
+    return re.sub(r"\s*EM-P", "", model)
+
+
+PARAPHRASE_PROMPT = """把下面这句车主说的话改写成另一种自然说法。
+硬性要求：
+1. 所有事实必须原样保留：车型、城市、车牌、门店名、日期、功能名、偏好动作、红线内容
+   **一个字都不能改**；不许增删任何事实；
+2. 只改语气词、句式、语序，让它更像真人说话；
+3. 只输出改写后的句子，不要解释、不要引号。"""
+
+
+def _turn_keepers(turn_index: int, card: Dict[str, Any], order_id: str,
+                  order_date: str) -> List[str]:
+    """每轮必须原样保留的关键事实（润色校验用）。"""
+    keepers = {
+        1: [card["city"], _model_core(card["model"]), card["plate"]],
+        2: [card["center"]],
+        3: [order_date],
+        4: [order_id, order_date, card["center"]],
+        5: [card["pref_feature"], card["pref_action"]],
+    }
+    if turn_index == 6:
+        keepers[6] = [card["alt_center"]] if card["drift"] else ["保养"]
+    keepers[7] = [card["redline"]]
+    return keepers.get(turn_index, [])
+
+
+def paraphrase_turn(llm: Any, text: str, keepers: List[str]) -> str:
+    """LLM 润色一句；关键事实丢失则回退原文（宁可生硬，不可改事实）。"""
+    resp = llm.chat([{"role": "user", "content": PARAPHRASE_PROMPT + "\n\n" + text}],
+                    temperature=0.7, max_tokens=200)
+    rewritten = (resp.content or "").strip()
+    if not rewritten or len(rewritten) < 4:
+        return text
+    if all(_norm(k) in _norm(rewritten) for k in keepers):
+        return rewritten
+    return text
+
+
+def build_sample(card: Dict[str, Any], idx: int, llm: Any = None) -> Sample:
     """把一张画像卡展开成：7 轮对话（3 会话、跨度 14 天）+ gold 事实 + 6 道题。"""
     base = date(2026, 10, 1) + timedelta(days=idx)
     d0, d7, d14 = base, base + timedelta(days=7), base + timedelta(days=14)
@@ -65,6 +110,16 @@ def build_sample(card: Dict[str, Any], idx: int) -> Sample:
     turns.append(Turn(d14.isoformat(), 3, "user", f"以后千万别{card['redline']}"))
     gold.append({"key": "do_not", "value": card["redline"], "source": "user_explicit", "turn": 7})
 
+    # LLM 润色（可选）：改写 user 轮次的措辞；关键事实经 _turn_keepers 硬校验，
+    # 丢失即回退原文——gold 不变，只改变"表面形式"。
+    if llm is not None:
+        for i, turn in enumerate(turns):
+            if turn.speaker != "user":
+                continue
+            keepers = _turn_keepers(i + 1, card, order_id, d7.isoformat())
+            turns[i] = Turn(turn.ts, turn.session, turn.speaker,
+                            paraphrase_turn(llm, turn.text, keepers))
+
     latest_center = card["alt_center"] if card["drift"] else card["center"]
     questions = [
         Question(f"{sid}-IE1", "IE", "我住在哪个城市？", card["city"]),
@@ -82,8 +137,10 @@ def build_sample(card: Dict[str, Any], idx: int) -> Sample:
                   questions=questions)
 
 
-def generate(n: int = 100, seed: int = 42, out: str = OUT_JSONL) -> Tuple[List[Sample], Dict[str, Any]]:
-    samples = [build_sample(card, i) for i, card in enumerate(build_cards(n=n, seed=seed))]
+def generate(n: int = 100, seed: int = 42, out: str = OUT_JSONL,
+             llm: Any = None) -> Tuple[List[Sample], Dict[str, Any]]:
+    samples = [build_sample(card, i, llm=llm)
+               for i, card in enumerate(build_cards(n=n, seed=seed))]
     save_jsonl(samples, out)
     return samples, stats(samples)
 
@@ -93,9 +150,18 @@ def main() -> int:
     ap.add_argument("--n", type=int, default=100, help="车主数（默认 100 → 700 轮 / 600 题）")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--out", default=OUT_JSONL)
+    ap.add_argument("--paraphrase", action="store_true",
+                    help="用 LLM 润色 user 轮次措辞（关键事实硬校验，丢失回退原文）")
+    ap.add_argument("--provider", default="deepseek", help="润色用的 LLM 后端（--paraphrase 时生效）")
     args = ap.parse_args()
-    samples, st = generate(n=args.n, seed=args.seed, out=args.out)
-    print(f"已生成 {st['samples']} 个车主样本 → {args.out}")
+
+    llm = None
+    if args.paraphrase:
+        from eval.llm_backend import make_llm
+        llm = make_llm(args)
+    samples, st = generate(n=args.n, seed=args.seed, out=args.out, llm=llm)
+    print(f"已生成 {st['samples']} 个车主样本 → {args.out}"
+          + ("（LLM 润色）" if args.paraphrase else ""))
     print(f"  轮次 {st['turns']} ｜ 题目 {st['questions']} ｜ 题型分布 {st['by_type']}")
     print(f"  会话数 {st['sessions']}（每车主 3 会话、跨度 14 天）")
     return 0

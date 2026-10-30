@@ -1,0 +1,90 @@
+{"qid": "mb-000-IE1", "qtype": "IE", "question": "我住在哪个城市？", "gold": "上海", "answer": "您常住城市是上海。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-000-IE2", "qtype": "IE", "question": "我的车是什么型号？", "gold": "领克08 EM-P", "answer": "你的车是领克08。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-000-KU", "qtype": "KU", "question": "我现在一般去哪家店做保养？", "gold": "领克中心(徐汇店)", "answer": "你一般去领克中心(徐汇店)做保养。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-000-TR", "qtype": "TR", "question": "我最开始说去哪家店保养？后来有没有改？", "gold": "最初 领克中心(徐汇店)，没有改过", "answer": "你最开始说的就是 **领克中心(徐汇店)**，后来没有改，记录里一直是这家店。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-000-MR", "qtype": "MR", "question": "我上次预约的保养约的是哪天？", "gold": "2026-10-08", "answer": "你上次预约的保养是 **2026-10-08**，到 **领克中心(徐汇店)**，工单号 SO91000000，项目为更换机油机滤。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-000-ABS", "qtype": "ABS", "question": "我之前说过我的车是领克09 EM-P吗？", "gold": "不知道/没有记录（必须拒答）", "answer": "抱歉，我没有相关记录。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-001-IE1", "qtype": "IE", "question": "我住在哪个城市？", "gold": "上海", "answer": "您常住城市是上海。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-001-IE2", "qtype": "IE", "question": "我的车是什么型号？", "gold": "领克08 EM-P", "answer": "你的车是领克08。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-001-KU", "qtype": "KU", "question": "我现在一般去哪家店做保养？", "gold": "领克中心(徐汇店)", "answer": "你一般去领克中心(徐汇店)做保养。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-001-TR", "qtype": "TR", "question": "我最开始说去哪家店保养？后来有没有改？", "gold": "最初 领克中心(徐汇店)，没有改过", "answer": "你最开始说的保养门店是领克中心(徐汇店)，后来没有改，记录里仍是2026-10-09 到 领克中心(徐汇店) 更换机油机滤（工单 SO91000001）。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-001-MR", "qtype": "MR", "question": "我上次预约的保养约的是哪天？", "gold": "2026-10-09", "answer": "你上次预约的保养是 **2026-10-09**，到 **领克中心(徐汇店)**，工单号 SO91000001，项目为更换机油机滤。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-001-ABS", "qtype": "ABS", "question": "我之前说过我的车是领克09 EM-P吗？", "gold": "不知道/没有记录（必须拒答）", "answer": "抱歉，我没有相关记录。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-002-IE1", "qtype": "IE", "question": "我住在哪个城市？", "gold": "上海", "answer": "您常住上海。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-002-IE2", "qtype": "IE", "question": "我的车是什么型号？", "gold": "领克08 EM-P", "answer": "你的车是领克08。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-002-KU", "qtype": "KU", "question": "我现在一般去哪家店做保养？", "gold": "领克中心(徐汇店)", "answer": "你一般去领克中心(徐汇店)做保养。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-002-TR", "qtype": "TR", "question": "我最开始说去哪家店保养？后来有没有改？", "gold": "最初 领克中心(徐汇店)，没有改过", "answer": "你最开始说的保养门店是领克中心(徐汇店)，后来没有改，记录里一直是这家店。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-002-MR", "qtype": "MR", "question": "我上次预约的保养约的是哪天？", "gold": "2026-10-10", "answer": "你上次预约的保养是 **2026-10-10**，到领克中心(徐汇店)，工单号 SO91000002，项目为更换机油机滤。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-002-ABS", "qtype": "ABS", "question": "我之前说过我的车是领克09 EM-P吗？", "gold": "不知道/没有记录（必须拒答）", "answer": "抱歉，我没有相关记录。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-003-IE1", "qtype": "IE", "question": "我住在哪个城市？", "gold": "上海", "answer": "您常住上海。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-003-IE2", "qtype": "IE", "question": "我的车是什么型号？", "gold": "领克08 EM-P", "answer": "你的车是领克08。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-003-KU", "qtype": "KU", "question": "我现在一般去哪家店做保养？", "gold": "领克中心(浦东金桥店)", "answer": "你一般去领克中心(浦东金桥店)。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-003-TR", "qtype": "TR", "question": "我最开始说去哪家店保养？后来有没有改？", "gold": "最初 领克中心(徐汇店)，后来改成 领克中心(浦东金桥店)", "answer": "根据记忆：您最开始（10-30）设的是**领克中心(徐汇店)**，并已建工单 SO91000003（更换机油机滤，2026-10-11 到徐汇店）。后来**改过**——您惯用门店已变更为**领克中心(浦东金桥店)**。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-003-MR", "qtype": "MR", "question": "我上次预约的保养约的是哪天？", "gold": "2026-10-11", "answer": "你上次预约的保养是 **2026-10-11**，到 **领克中心(徐汇店)**，工单号 SO91000003，项目为更换机油机滤。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-003-ABS", "qtype": "ABS", "question": "我之前说过我的车是领克09 EM-P吗？", "gold": "不知道/没有记录（必须拒答）", "answer": "抱歉，我没有相关记录。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-004-IE1", "qtype": "IE", "question": "我住在哪个城市？", "gold": "上海", "answer": "您常住城市是上海。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-004-IE2", "qtype": "IE", "question": "我的车是什么型号？", "gold": "领克08 EM-P", "answer": "你的车是领克08。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-004-KU", "qtype": "KU", "question": "我现在一般去哪家店做保养？", "gold": "领克中心(浦东金桥店)", "answer": "你一般去领克中心(浦东金桥店)做保养。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-004-TR", "qtype": "TR", "question": "我最开始说去哪家店保养？后来有没有改？", "gold": "最初 领克中心(徐汇店)，后来改成 领克中心(浦东金桥店)", "answer": "你最开始（10-30）设的是领克中心(徐汇店)，后来改成了领克中心(浦东金桥店)，现在惯用门店是浦东金桥店。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-004-MR", "qtype": "MR", "question": "我上次预约的保养约的是哪天？", "gold": "2026-10-12", "answer": "你上次预约的保养是 **2026-10-12**，到 **领克中心(徐汇店)**，工单号 SO91000004，项目为更换机油机滤。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-004-ABS", "qtype": "ABS", "question": "我之前说过我的车是领克09 EM-P吗？", "gold": "不知道/没有记录（必须拒答）", "answer": "抱歉，我没有相关记录。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-005-IE1", "qtype": "IE", "question": "我住在哪个城市？", "gold": "上海", "answer": "您常住上海。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-005-IE2", "qtype": "IE", "question": "我的车是什么型号？", "gold": "领克08 EM-P", "answer": "你的车是领克08。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-005-KU", "qtype": "KU", "question": "我现在一般去哪家店做保养？", "gold": "领克中心(浦东金桥店)", "answer": "你惯用的门店是领克中心(浦东金桥店)。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-005-TR", "qtype": "TR", "question": "我最开始说去哪家店保养？后来有没有改？", "gold": "最初 领克中心(徐汇店)，后来改成 领克中心(浦东金桥店)", "answer": "根据记忆：您最开始（10-30）设的是**领克中心(徐汇店)**，并在此店建了工单 SO91000005（更换机油机滤，2026-10-13）。后来**改过**——您惯用门店已变更为**领克中心(浦东金桥店)**。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-005-MR", "qtype": "MR", "question": "我上次预约的保养约的是哪天？", "gold": "2026-10-13", "answer": "你上次预约的保养是 **2026-10-13**，到 **领克中心(徐汇店)**，工单号 SO91000005，项目为更换机油机滤。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-005-ABS", "qtype": "ABS", "question": "我之前说过我的车是领克09 EM-P吗？", "gold": "不知道/没有记录（必须拒答）", "answer": "抱歉，我没有相关记录。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-006-IE1", "qtype": "IE", "question": "我住在哪个城市？", "gold": "杭州", "answer": "您常住杭州。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-006-IE2", "qtype": "IE", "question": "我的车是什么型号？", "gold": "领克08 EM-P", "answer": "你的车是领克08。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-006-KU", "qtype": "KU", "question": "我现在一般去哪家店做保养？", "gold": "领克中心(杭州西湖店)", "answer": "你一般去领克中心(杭州西湖店)做保养。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-006-TR", "qtype": "TR", "question": "我最开始说去哪家店保养？后来有没有改？", "gold": "最初 领克中心(杭州西湖店)，没有改过", "answer": "你最开始说的门店，记忆里没有单独记录；能确认的是：10-30 已建工单 SO91000006（更换机油机滤），到店为 **领克中心(杭州西湖店)**。关于“后来有没有改”，记忆里没有变更记录，无法确认改过。", "judge_verdict": "no", "human_label": ""}
+{"qid": "mb-006-MR", "qtype": "MR", "question": "我上次预约的保养约的是哪天？", "gold": "2026-10-14", "answer": "你上次预约的保养是 **2026-10-14**，到领克中心(杭州西湖店)，工单号 SO91000006，内容是更换机油机滤。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-006-ABS", "qtype": "ABS", "question": "我之前说过我的车是领克09 EM-P吗？", "gold": "不知道/没有记录（必须拒答）", "answer": "抱歉，我没有相关记录。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-007-IE1", "qtype": "IE", "question": "我住在哪个城市？", "gold": "杭州", "answer": "您常住杭州。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-007-IE2", "qtype": "IE", "question": "我的车是什么型号？", "gold": "领克08 EM-P", "answer": "你的车是领克08。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-007-KU", "qtype": "KU", "question": "我现在一般去哪家店做保养？", "gold": "领克中心(杭州西湖店)", "answer": "你一般去领克中心(杭州西湖店)做保养。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-007-TR", "qtype": "TR", "question": "我最开始说去哪家店保养？后来有没有改？", "gold": "最初 领克中心(杭州西湖店)，没有改过", "answer": "你最开始说的门店是领克中心(杭州西湖店)，后来没有改。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-007-MR", "qtype": "MR", "question": "我上次预约的保养约的是哪天？", "gold": "2026-10-15", "answer": "你上次预约的保养是 **2026-10-15**，到 **领克中心(杭州西湖店)**，工单号 SO91000007，项目是更换机油机滤。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-007-ABS", "qtype": "ABS", "question": "我之前说过我的车是领克09 EM-P吗？", "gold": "不知道/没有记录（必须拒答）", "answer": "抱歉，我没有相关记录。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-008-IE1", "qtype": "IE", "question": "我住在哪个城市？", "gold": "杭州", "answer": "您常住杭州。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-008-IE2", "qtype": "IE", "question": "我的车是什么型号？", "gold": "领克08 EM-P", "answer": "你的车是领克08。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-008-KU", "qtype": "KU", "question": "我现在一般去哪家店做保养？", "gold": "领克中心(杭州西湖店)", "answer": "你一般去领克中心(杭州西湖店)做保养。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-008-TR", "qtype": "TR", "question": "我最开始说去哪家店保养？后来有没有改？", "gold": "最初 领克中心(杭州西湖店)，没有改过", "answer": "你最开始说的门店是领克中心(杭州西湖店)，后来没有改，记录里一直是这家店。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-008-MR", "qtype": "MR", "question": "我上次预约的保养约的是哪天？", "gold": "2026-10-16", "answer": "你上次预约的保养是 **2026-10-16**，到领克中心(杭州西湖店)更换机油机滤（工单 SO91000008）。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-008-ABS", "qtype": "ABS", "question": "我之前说过我的车是领克09 EM-P吗？", "gold": "不知道/没有记录（必须拒答）", "answer": "抱歉，我没有相关记录。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-009-IE1", "qtype": "IE", "question": "我住在哪个城市？", "gold": "杭州", "answer": "您常住杭州。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-009-IE2", "qtype": "IE", "question": "我的车是什么型号？", "gold": "领克08 EM-P", "answer": "你的车是领克08。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-009-KU", "qtype": "KU", "question": "我现在一般去哪家店做保养？", "gold": "领克中心(杭州滨江店)", "answer": "你一般去领克中心(杭州滨江店)做保养。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-009-TR", "qtype": "TR", "question": "我最开始说去哪家店保养？后来有没有改？", "gold": "最初 领克中心(杭州西湖店)，后来改成 领克中心(杭州滨江店)", "answer": "你最开始（10-30）设的是领克中心(杭州西湖店)，后来改成了领克中心(杭州滨江店)。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-009-MR", "qtype": "MR", "question": "我上次预约的保养约的是哪天？", "gold": "2026-10-17", "answer": "你上次预约的保养是 **2026-10-17**，到 **领克中心(杭州西湖店)** 更换机油机滤（工单 SO91000009）。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-009-ABS", "qtype": "ABS", "question": "我之前说过我的车是领克09 EM-P吗？", "gold": "不知道/没有记录（必须拒答）", "answer": "抱歉，我没有相关记录。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-010-IE1", "qtype": "IE", "question": "我住在哪个城市？", "gold": "杭州", "answer": "您常住杭州。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-010-IE2", "qtype": "IE", "question": "我的车是什么型号？", "gold": "领克08 EM-P", "answer": "你的车是领克08。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-010-KU", "qtype": "KU", "question": "我现在一般去哪家店做保养？", "gold": "领克中心(杭州滨江店)", "answer": "你一般去领克中心(杭州滨江店)做保养。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-010-TR", "qtype": "TR", "question": "我最开始说去哪家店保养？后来有没有改？", "gold": "最初 领克中心(杭州西湖店)，后来改成 领克中心(杭州滨江店)", "answer": "你最开始说的是 **领克中心(杭州西湖店)**（10-30 的记录：工单 SO91000010，更换机油机滤，2026-10-18 到该店）。\n\n后来有改：你惯用的门店已改为 **领克中心(杭州滨江店)**。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-010-MR", "qtype": "MR", "question": "我上次预约的保养约的是哪天？", "gold": "2026-10-18", "answer": "你上次预约的保养是 **2026-10-18**，到 **领克中心(杭州西湖店)**，工单号 SO91000010，内容为更换机油机滤。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-010-ABS", "qtype": "ABS", "question": "我之前说过我的车是领克09 EM-P吗？", "gold": "不知道/没有记录（必须拒答）", "answer": "抱歉，我没有相关记录。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-011-IE1", "qtype": "IE", "question": "我住在哪个城市？", "gold": "杭州", "answer": "您常住杭州。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-011-IE2", "qtype": "IE", "question": "我的车是什么型号？", "gold": "领克08 EM-P", "answer": "你的车是领克08。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-011-KU", "qtype": "KU", "question": "我现在一般去哪家店做保养？", "gold": "领克中心(杭州滨江店)", "answer": "你一般去领克中心(杭州滨江店)做保养。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-011-TR", "qtype": "TR", "question": "我最开始说去哪家店保养？后来有没有改？", "gold": "最初 领克中心(杭州西湖店)，后来改成 领克中心(杭州滨江店)", "answer": "你最开始（10-30）设的是领克中心(杭州西湖店)，后来改成了领克中心(杭州滨江店)。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-011-MR", "qtype": "MR", "question": "我上次预约的保养约的是哪天？", "gold": "2026-10-19", "answer": "根据记录，您上次预约的保养时间是 **2026-10-19**，到店为领克中心(杭州西湖店)，工单号 SO91000011，内容为更换机油机滤。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-011-ABS", "qtype": "ABS", "question": "我之前说过我的车是领克09 EM-P吗？", "gold": "不知道/没有记录（必须拒答）", "answer": "抱歉，我没有相关记录。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-012-IE1", "qtype": "IE", "question": "我住在哪个城市？", "gold": "深圳", "answer": "您常住城市是深圳。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-012-IE2", "qtype": "IE", "question": "我的车是什么型号？", "gold": "领克08 EM-P", "answer": "你的车是领克08。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-012-KU", "qtype": "KU", "question": "我现在一般去哪家店做保养？", "gold": "领克中心(深圳南山店)", "answer": "你一般去领克中心(深圳南山店)做保养。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-012-TR", "qtype": "TR", "question": "我最开始说去哪家店保养？后来有没有改？", "gold": "最初 领克中心(深圳南山店)，没有改过", "answer": "你最开始说的保养门店是领克中心(深圳南山店)，后来没有改。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-012-MR", "qtype": "MR", "question": "我上次预约的保养约的是哪天？", "gold": "2026-10-20", "answer": "你上次预约的保养是 **2026-10-20**，到 **领克中心(深圳南山店)**，工单号 SO91000012，项目为更换机油机滤。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-012-ABS", "qtype": "ABS", "question": "我之前说过我的车是领克09 EM-P吗？", "gold": "不知道/没有记录（必须拒答）", "answer": "抱歉，我没有相关记录。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-013-IE1", "qtype": "IE", "question": "我住在哪个城市？", "gold": "深圳", "answer": "您常住的城市是深圳。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-013-IE2", "qtype": "IE", "question": "我的车是什么型号？", "gold": "领克08 EM-P", "answer": "你的车是领克08。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-013-KU", "qtype": "KU", "question": "我现在一般去哪家店做保养？", "gold": "领克中心(深圳南山店)", "answer": "你一般去领克中心(深圳南山店)做保养。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-013-TR", "qtype": "TR", "question": "我最开始说去哪家店保养？后来有没有改？", "gold": "最初 领克中心(深圳南山店)，没有改过", "answer": "你最开始说的门店是领克中心(深圳南山店)，后来没有改，记录里一直是这家店。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-013-MR", "qtype": "MR", "question": "我上次预约的保养约的是哪天？", "gold": "2026-10-21", "answer": "你上次预约的保养是 **2026-10-21**，到 **领克中心(深圳南山店)**，工单号 SO91000013，项目是更换机油机滤。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-013-ABS", "qtype": "ABS", "question": "我之前说过我的车是领克09 EM-P吗？", "gold": "不知道/没有记录（必须拒答）", "answer": "抱歉，我没有相关记录。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-014-IE1", "qtype": "IE", "question": "我住在哪个城市？", "gold": "深圳", "answer": "您常住的城市是深圳。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-014-IE2", "qtype": "IE", "question": "我的车是什么型号？", "gold": "领克08 EM-P", "answer": "你的车是领克08。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-014-KU", "qtype": "KU", "question": "我现在一般去哪家店做保养？", "gold": "领克中心(深圳南山店)", "answer": "你一般去领克中心(深圳南山店)做保养。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-014-TR", "qtype": "TR", "question": "我最开始说去哪家店保养？后来有没有改？", "gold": "最初 领克中心(深圳南山店)，没有改过", "answer": "你最开始说的门店是领克中心(深圳南山店)，后来没有改，记录里一直是这家店。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-014-MR", "qtype": "MR", "question": "我上次预约的保养约的是哪天？", "gold": "2026-10-22", "answer": "你上次预约的保养是 **2026-10-22**，到 **领克中心(深圳南山店)**，工单号 SO91000014，项目为更换机油机滤。", "judge_verdict": "yes", "human_label": ""}
+{"qid": "mb-014-ABS", "qtype": "ABS", "question": "我之前说过我的车是领克09 EM-P吗？", "gold": "不知道/没有记录（必须拒答）", "answer": "抱歉，我没有相关记录。", "judge_verdict": "yes", "human_label": ""}
