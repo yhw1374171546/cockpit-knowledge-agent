@@ -59,21 +59,8 @@ harden_stdout()
 
 from agent.graph import AgentConfig, AgentGraph  # noqa: E402
 from agent.kb import FIXTURE_KB, KnowledgeBase  # noqa: E402
-from agent.longterm import (  # noqa: E402
-    LongTermMemory,
-    defaults_from_preferences,
-    order_event_recorder,
-)
 from agent.memory import ConversationMemory  # noqa: E402
 from agent.orders import OrderStore  # noqa: E402
-from agent.profile.pipeline import (  # noqa: E402
-    ProfilePipeline,
-)
-from agent.profile.pipeline import (
-    order_event_recorder as v2_order_event_recorder,
-)
-from agent.profile.retrieve import LocalEmbedder  # noqa: E402
-from agent.profile.store import ProfileStore  # noqa: E402
 from agent.tools import ToolRegistry  # noqa: E402
 from eval.llm_backend import (  # noqa: E402
     add_llm_args,
@@ -82,6 +69,7 @@ from eval.llm_backend import (  # noqa: E402
     llm_label,
     make_llm,
 )
+from eval.memory_backends import LocalEmbedder, MemoryBackend, make_backend  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 USER = "u1"
@@ -162,78 +150,6 @@ def _check_contains(substr: str) -> Callable[[Dict[str, Any], OrderStore, str], 
     def check(state: Dict[str, Any], orders: OrderStore, order_id: str) -> bool:
         return substr in str(state.get("answer") or "")
     return check
-
-
-# ── v1/v2 记忆后端切换（基线矩阵的接口层）────────────────────────────────
-
-class MemoryBackend:
-    """v1（longterm）与 v2（profile）的统一接口：AB 脚本只认这个接口。
-
-    基线矩阵（阶段 4）就是：同 12 场景、同 harness，只换 `--profile`。
-    """
-
-    def extract_and_remember(self, text: str) -> None:
-        raise NotImplementedError
-
-    def defaults(self) -> Dict[str, str]:
-        raise NotImplementedError
-
-    def context_text(self, query: str) -> str:
-        raise NotImplementedError
-
-    def order_recorder(self, session_id: str, query: str) -> Optional[Callable]:
-        raise NotImplementedError
-
-    def close(self) -> None:
-        raise NotImplementedError
-
-
-class V1Backend(MemoryBackend):
-    """v1：LongTermMemory（正则抽取 + 词面召回，冻结为基线）。"""
-
-    def __init__(self, mem_path: str, embedder: Any = None):
-        self.store = LongTermMemory(mem_path)
-
-    def extract_and_remember(self, text: str) -> None:
-        self.store.extract_and_remember(text, user_id=USER)
-
-    def defaults(self) -> Dict[str, str]:
-        return defaults_from_preferences(self.store, USER)
-
-    def context_text(self, query: str) -> str:
-        return self.store.context_text(query, user_id=USER)
-
-    def order_recorder(self, session_id: str, query: str):
-        return order_event_recorder(self.store, USER, session_id, query)
-
-    def close(self) -> None:
-        self.store.close()
-
-
-class V2Backend(MemoryBackend):
-    """v2：ProfilePipeline（五层画像 + 冲突消解 + 嵌入/词面双路召回）。"""
-
-    def __init__(self, mem_path: str, embedder: Any = None):
-        self.pipeline = ProfilePipeline(ProfileStore(mem_path), embedder=embedder, user_id=USER)
-
-    def extract_and_remember(self, text: str) -> None:
-        self.pipeline.extract_and_remember(text)
-
-    def defaults(self) -> Dict[str, str]:
-        return self.pipeline.defaults_from_preferences()
-
-    def context_text(self, query: str) -> str:
-        return self.pipeline.context_text(query)
-
-    def order_recorder(self, session_id: str, query: str):
-        return v2_order_event_recorder(self.pipeline, USER, session_id, query)
-
-    def close(self) -> None:
-        self.pipeline.store.close()
-
-
-def make_backend(profile: str, mem_path: str, embedder: Any = None) -> MemoryBackend:
-    return V2Backend(mem_path, embedder) if profile == "v2" else V1Backend(mem_path)
 
 
 BOOK = "帮我约 {date} 到店保养，换机油机滤。我已经确认过了，直接办。"
