@@ -20,6 +20,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -64,10 +65,13 @@ class MemoryContext:
             return ""
         prefs = [i for i in self.items if i.kind == "semantic"]
         reds = [i for i in self.items if i.kind == "constraint"]
+        eps = [i for i in self.items if i.kind == "episode"]
         lines = ["【跨会话记忆】"]
         if prefs:
             lines.append("- 车主画像：" + "；".join(
                 f"{i.meta.get('label', i.key)}={i.text}" for i in prefs))
+        if eps:
+            lines.append("- 相关历史：" + "；".join(i.text for i in eps))
         if reds:
             lines.append("- 车主红线（必须遵守）：" + "；".join(i.text for i in reds))
         lines.append("（以上是历史信息；若与本次手册原文或实时车况冲突，以本次信息为准，并向车主说明差异）")
@@ -297,7 +301,32 @@ def retrieve(query: str, store: ProfileStore, user_id: str = "default",
                                     {"label": label,
                                      "confidence": round(fact.confidence, 3),
                                      "source": fact.source}))
-    # 约束红线排最后展示也行，但保持注入顺序：先画像后红线（to_prompt 已分组）
+    # ── 情景记忆（episodes）：v2 的嵌入语义匹配是修复 v1"口语指代失效"的关键 ──
+    for ep in store.episodes(user_id, now=now):
+        summary = str(ep["summary"])
+        if query_vec is not None:
+            vec = embed_cache.get(summary)
+            if vec is None and embedder is not None:
+                enc = embedder.encode([summary])
+                vec = enc[0] if enc else None
+                if vec is not None:
+                    embed_cache[summary] = vec
+            sim = cosine(query_vec, vec) if vec else 0.0
+        else:
+            sim = overlap_score(query, summary)
+        recency = max(0.0, 1.0 - (now - float(ep["created_at"])) / (30 * DAY))
+        total = sim * (0.8 + 0.2 * recency)
+        if total < min_score:
+            ctx.dropped += 1
+            continue
+        stamp = time.strftime("%m-%d", time.localtime(float(ep["created_at"])))
+        ctx.items.append(MemoryItem("episode", str(ep["id"]),
+                                    f"{stamp} 记录：{summary}", round(total, 3),
+                                    {"source": "episode"}))
+    # 情景取 top-k：与画像分开截断，避免长历史挤掉画像/红线
+    eps = [i for i in ctx.items if i.kind == "episode"]
+    eps.sort(key=lambda i: -i.score)
+    ctx.items = [i for i in ctx.items if i.kind != "episode"] + eps[:2]
     return ctx
 
 

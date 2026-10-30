@@ -66,6 +66,14 @@ from agent.longterm import (  # noqa: E402
 )
 from agent.memory import ConversationMemory  # noqa: E402
 from agent.orders import OrderStore  # noqa: E402
+from agent.profile.pipeline import (  # noqa: E402
+    ProfilePipeline,
+)
+from agent.profile.pipeline import (
+    order_event_recorder as v2_order_event_recorder,
+)
+from agent.profile.retrieve import LocalEmbedder  # noqa: E402
+from agent.profile.store import ProfileStore  # noqa: E402
 from agent.tools import ToolRegistry  # noqa: E402
 from eval.llm_backend import (  # noqa: E402
     add_llm_args,
@@ -156,6 +164,78 @@ def _check_contains(substr: str) -> Callable[[Dict[str, Any], OrderStore, str], 
     return check
 
 
+# ── v1/v2 记忆后端切换（基线矩阵的接口层）────────────────────────────────
+
+class MemoryBackend:
+    """v1（longterm）与 v2（profile）的统一接口：AB 脚本只认这个接口。
+
+    基线矩阵（阶段 4）就是：同 12 场景、同 harness，只换 `--profile`。
+    """
+
+    def extract_and_remember(self, text: str) -> None:
+        raise NotImplementedError
+
+    def defaults(self) -> Dict[str, str]:
+        raise NotImplementedError
+
+    def context_text(self, query: str) -> str:
+        raise NotImplementedError
+
+    def order_recorder(self, session_id: str, query: str) -> Optional[Callable]:
+        raise NotImplementedError
+
+    def close(self) -> None:
+        raise NotImplementedError
+
+
+class V1Backend(MemoryBackend):
+    """v1：LongTermMemory（正则抽取 + 词面召回，冻结为基线）。"""
+
+    def __init__(self, mem_path: str, embedder: Any = None):
+        self.store = LongTermMemory(mem_path)
+
+    def extract_and_remember(self, text: str) -> None:
+        self.store.extract_and_remember(text, user_id=USER)
+
+    def defaults(self) -> Dict[str, str]:
+        return defaults_from_preferences(self.store, USER)
+
+    def context_text(self, query: str) -> str:
+        return self.store.context_text(query, user_id=USER)
+
+    def order_recorder(self, session_id: str, query: str):
+        return order_event_recorder(self.store, USER, session_id, query)
+
+    def close(self) -> None:
+        self.store.close()
+
+
+class V2Backend(MemoryBackend):
+    """v2：ProfilePipeline（五层画像 + 冲突消解 + 嵌入/词面双路召回）。"""
+
+    def __init__(self, mem_path: str, embedder: Any = None):
+        self.pipeline = ProfilePipeline(ProfileStore(mem_path), embedder=embedder, user_id=USER)
+
+    def extract_and_remember(self, text: str) -> None:
+        self.pipeline.extract_and_remember(text)
+
+    def defaults(self) -> Dict[str, str]:
+        return self.pipeline.defaults_from_preferences()
+
+    def context_text(self, query: str) -> str:
+        return self.pipeline.context_text(query)
+
+    def order_recorder(self, session_id: str, query: str):
+        return v2_order_event_recorder(self.pipeline, USER, session_id, query)
+
+    def close(self) -> None:
+        self.pipeline.store.close()
+
+
+def make_backend(profile: str, mem_path: str, embedder: Any = None) -> MemoryBackend:
+    return V2Backend(mem_path, embedder) if profile == "v2" else V1Backend(mem_path)
+
+
 BOOK = "帮我约 {date} 到店保养，换机油机滤。我已经确认过了，直接办。"
 # 双工单场景的"另一张单"：维修类，日期与门店都与主工单（保养）不同
 REPAIR_EXTRA = {"item": "更换刹车片", "preferred_date": ORDER_DATE2,
@@ -226,23 +306,22 @@ SCENARIOS: List[Scenario] = [
 #    扩大变体只会放大同一个已知弱点，等 v2 嵌入召回落地后再扩。
 
 
-def seed(mem_path: str, orders_path: str, scenario: Scenario) -> Dict[str, Any]:
+def seed(backend: MemoryBackend, orders_path: str, scenario: Scenario) -> Dict[str, Any]:
     """把"昨天发生过的事"写进两个库；返回 {"primary": 主工单号, "extras": [额外工单号…]}。
 
     情景记忆的写入带**按工单区分的 query 前缀**（"用户提到「保养」；已建工单…"）：
     多工单场景下如果两张单的摘要共享同一个前缀，召回会把两张都捞出来，
     "上次那个维修"就定位不到正确的那张（第一版就是这么设计失败的）。
     """
-    store = LongTermMemory(mem_path)
     orders = OrderStore(orders_path, enforce_future_date=True)
     oids: Dict[str, Any] = {"primary": "", "extras": []}
     try:
         if scenario.seed_text:
-            store.extract_and_remember(scenario.seed_text, user_id=USER)
+            backend.extract_and_remember(scenario.seed_text)
         if scenario.seed_text2:
-            # 漂移/改口：第二句按写入顺序覆盖第一句（v1 的 overwrite 语义）
-            store.extract_and_remember(scenario.seed_text2, user_id=USER)
-        defaults = defaults_from_preferences(store, USER) if scenario.seed_text else {}
+            # 漂移/改口：第二句按写入顺序覆盖第一句（overwrite 语义）
+            backend.extract_and_remember(scenario.seed_text2)
+        defaults = backend.defaults() if scenario.seed_text else {}
         registry = ToolRegistry(KnowledgeBase.load(FIXTURE_KB), orders=orders,
                                 user_id=USER, defaults=defaults, on_event=None)
 
@@ -258,7 +337,9 @@ def seed(mem_path: str, orders_path: str, scenario: Scenario) -> Dict[str, Any]:
                 registry.confirm(pending.meta["action_key"])
             result = registry.call("create_service_order", args)
             if result.ok and result.data:
-                order_event_recorder(store, USER, "seed", prefix)("order_created", result.data)
+                rec = backend.order_recorder("seed", prefix)
+                if rec:
+                    rec("order_created", result.data)
                 return str(result.data.get("预约单号") or "")
             return ""
 
@@ -271,20 +352,20 @@ def seed(mem_path: str, orders_path: str, scenario: Scenario) -> Dict[str, Any]:
                              extra.get("query", f"工单{i + 1}"))
             oids["extras"].append(oid)
     finally:
-        store.close()
         orders.close()
     return oids
 
 
 def run_case(scenario: Scenario, use_memory: bool, llm: Any, kb: Any,
-             mem_path: str, orders_path: str, order_id: str = "") -> Dict[str, Any]:
-    store = LongTermMemory(mem_path) if use_memory else None
+             profile: str, embedder: Any, mem_path: str, orders_path: str,
+             order_id: str = "") -> Dict[str, Any]:
+    backend = make_backend(profile, mem_path, embedder) if use_memory else None
     orders = OrderStore(orders_path, enforce_future_date=False)
     try:
         registry = ToolRegistry(
             kb, orders=orders, user_id=USER,
-            defaults=defaults_from_preferences(store, USER) if store else {},
-            on_event=order_event_recorder(store, USER, "ab", scenario.query) if store else None,
+            defaults=backend.defaults() if backend else {},
+            on_event=backend.order_recorder("ab", scenario.query) if backend else None,
         )
         # 写操作需要车主确认：评测里把"用户已确认"预置好（两种条件完全一致），
         # 否则会把"确认流程"误判成"任务失败"。
@@ -297,8 +378,8 @@ def run_case(scenario: Scenario, use_memory: bool, llm: Any, kb: Any,
                 new_date=NEW_DATE, order_id=order_id)
             registry.confirm(action_key)
         memory = ConversationMemory()
-        if store is not None:
-            context = store.context_text(scenario.query, user_id=USER)
+        if backend is not None:
+            context = backend.context_text(scenario.query)
             memory.attach_longterm(context)
         # 这是"任务完成"评测，不是 RAG 接地评测：关掉证据门控与接地拒答，
         # 否则模型按设计先说一句"确认吗"就会被判 ungrounded → 直接拒答（实测踩过）。
@@ -360,8 +441,8 @@ def run_case(scenario: Scenario, use_memory: bool, llm: Any, kb: Any,
         }
     finally:
         orders.close()
-        if store is not None:
-            store.close()
+        if backend is not None:
+            backend.close()
 
 
 def bootstrap_ci(vals: Sequence[int], n_resample: int = 2000,
@@ -395,11 +476,14 @@ def main() -> int:
     ap.add_argument("--sid", default="", help="只跑指定场景 id（如 pref_store2），留空跑全部")
     ap.add_argument("--repeat", type=int, default=2,
                     help="每个条件重复跑几次（模型有随机性，单次不足以判断）")
+    ap.add_argument("--profile", choices=["v1", "v2"], default="v1",
+                    help="记忆后端：v1=longterm 基线（默认），v2=profile 画像管线")
     ap.add_argument("--json-out", default=os.path.join(ROOT, "eval", "memory_ab_real.json"))
     args = ap.parse_args()
 
     kb = KnowledgeBase.load(FIXTURE_KB if os.path.exists(FIXTURE_KB) else None)
     llm = make_llm(args, known_tools=ToolRegistry(kb).names())
+    embedder = LocalEmbedder() if args.profile == "v2" else None
     scenarios = SCENARIOS[:args.limit] if args.limit else SCENARIOS
     if args.sid:
         scenarios = [s for s in scenarios if s.sid == args.sid]
@@ -409,7 +493,7 @@ def main() -> int:
     tmp = tempfile.mkdtemp(prefix="mem-ab-real-")
 
     print("=" * 78)
-    print(f"记忆答案层 AB（{llm_label(args)}）")
+    print(f"记忆答案层 AB · 后端 {args.profile}（{llm_label(args)}）")
     print("=" * 78)
 
     rows: List[Dict[str, Any]] = []
@@ -419,7 +503,9 @@ def main() -> int:
     for scenario in scenarios:
         seed_mem = os.path.join(tmp, f"{scenario.sid}_seed_mem.db")
         seed_orders = os.path.join(tmp, f"{scenario.sid}_seed_orders.db")
-        oids = seed(seed_mem, seed_orders, scenario)
+        seed_backend = make_backend(args.profile, seed_mem, embedder)
+        oids = seed(seed_backend, seed_orders, scenario)
+        seed_backend.close()
         all_ids = [oids["primary"]] + list(oids["extras"])
         target_id = all_ids[scenario.target_order] if scenario.target_order < len(all_ids) \
             else oids["primary"]
@@ -436,7 +522,7 @@ def main() -> int:
                 shutil.copy(seed_mem, mem_path)
                 shutil.copy(seed_orders, orders_path)
                 item = run_case(scenario, condition == "on", llm, kb,
-                                mem_path, orders_path, target_id)
+                                args.profile, embedder, mem_path, orders_path, target_id)
                 results[condition].append(item)
                 bits[f"{condition}_success"].append(1 if item["success"] else 0)
                 bits[f"{condition}_redundant"].append(1 if item["asked_redundant"] else 0)
@@ -494,6 +580,7 @@ def main() -> int:
     ci = {name: list(bootstrap_ci(vals)) for name, vals in bits.items()}
     summary = {
         "backend": fields["backend"], "model": fields["model"],
+        "profile": args.profile,
         "scenarios": len(rows), "repeats": repeats, "runs_total": total,
         "success_on": on_success, "success_off": off_success,
         "redundant_on": on_redundant, "redundant_off": off_redundant,

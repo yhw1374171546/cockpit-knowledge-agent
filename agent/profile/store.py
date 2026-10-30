@@ -17,6 +17,7 @@ import json
 import sqlite3
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
@@ -89,6 +90,19 @@ class ProfileStore:
             );
             CREATE INDEX IF NOT EXISTS idx_facts_current
                 ON profile_facts(user_id, layer, key, t_valid DESC);
+            -- 情景记忆（工单轨迹/会话摘要）：与 v1 的 episodic 表同构，便于 AB 对标
+            CREATE TABLE IF NOT EXISTS episodes (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                session_id TEXT DEFAULT '',
+                summary TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                expires_at REAL NOT NULL,
+                last_used_at REAL DEFAULT 0,
+                dedupe_key TEXT UNIQUE
+            );
+            CREATE INDEX IF NOT EXISTS idx_episodes_user
+                ON episodes(user_id, created_at DESC);
             CREATE TABLE IF NOT EXISTS events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id TEXT, layer TEXT, key TEXT, action TEXT,
@@ -164,14 +178,51 @@ class ProfileStore:
             (user_id, layer, key, action, old_value, new_value, reason, at))
 
     # ── 观测 ──
+    # ── 情景记忆（episodes：与 v1 episodic 表同构）──
+    def remember_episode(self, summary: str, *, user_id: str = "default",
+                         session_id: str = "", dedupe_key: Optional[str] = None,
+                         ttl_days: int = 30, now: Optional[float] = None) -> Optional[str]:
+        """写一条情景记忆；`dedupe_key` 相同视为重复（幂等重试不会写两遍）。"""
+        summary = mask_sensitive((summary or "").strip())[:500]
+        if len(summary) < 4:
+            return None
+        now = self._now() if now is None else now
+        episode_id = f"ep{uuid.uuid4().hex[:14]}"
+        dedupe = dedupe_key or f"{user_id}:{session_id}:{uuid.uuid4().hex[:8]}"
+        with self._lock, self._conn:
+            try:
+                self._conn.execute(
+                    "INSERT INTO episodes (id, user_id, session_id, summary, created_at,"
+                    " expires_at, last_used_at, dedupe_key) VALUES (?,?,?,?,?,?,?,?)",
+                    (episode_id, user_id, session_id, summary, now,
+                     now + ttl_days * 86400.0, now, dedupe))
+            except sqlite3.IntegrityError:
+                return None                                     # 重复写入：直接忽略
+        self._event(user_id, "episodic", episode_id, "episode", None, summary, "order", now)
+        return episode_id
+
+    def episodes(self, user_id: str, now: Optional[float] = None,
+                 limit: int = 100) -> List[Dict[str, Any]]:
+        """未过期的情景记忆，按时间倒序（召回层打分用）。"""
+        now = self._now() if now is None else now
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, summary, created_at, expires_at FROM episodes"
+                " WHERE user_id=? AND expires_at >= ? ORDER BY created_at DESC LIMIT ?",
+                (user_id, now, limit)).fetchall()
+        return [dict(r) for r in rows]
+
     def stats(self, user_id: str) -> Dict[str, Any]:
         with self._lock:
             facts = self._conn.execute(
                 "SELECT COUNT(*) AS n FROM profile_facts WHERE user_id=? "
                 "AND t_invalid IS NULL", (user_id,)).fetchone()
+            episodes = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM episodes WHERE user_id=?", (user_id,)).fetchone()
             events = self._conn.execute(
                 "SELECT COUNT(*) AS n FROM events WHERE user_id=?", (user_id,)).fetchone()
-        return {"active_facts": int(facts["n"]), "events": int(events["n"])}
+        return {"active_facts": int(facts["n"]), "episodes": int(episodes["n"]),
+                "events": int(events["n"])}
 
     def events(self, user_id: str, limit: int = 20) -> List[Dict[str, Any]]:
         with self._lock:

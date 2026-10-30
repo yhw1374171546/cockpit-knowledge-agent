@@ -71,6 +71,14 @@ class ProfilePipeline:
             out["center"] = center
         return out
 
+    # ── 情景记忆（episodes）──
+    def remember_episode(self, summary: str, user_id: Optional[str] = None,
+                         session_id: str = "", dedupe_key: Optional[str] = None,
+                         ttl_days: int = 30) -> Optional[str]:
+        return self.store.remember_episode(summary, user_id=user_id or self.user_id,
+                                           session_id=session_id,
+                                           dedupe_key=dedupe_key, ttl_days=ttl_days)
+
     # ── 观测与维护 ──
     def fingerprint(self, user_id: Optional[str] = None) -> str:
         """记忆指纹：进语义缓存的 scope（记忆一变，缓存自然失效——与 v1 同语义）。"""
@@ -84,3 +92,35 @@ class ProfilePipeline:
 
     def maintain(self, user_id: Optional[str] = None, max_facts: int = 100) -> Dict[str, int]:
         return _maintain(self.store, user_id=user_id or self.user_id, max_facts=max_facts)
+
+
+def order_event_recorder(pipeline: ProfilePipeline, user_id: str,
+                         session_id: str = "orders",
+                         query: str = "") -> Any:
+    """工单写操作 → 情景记忆（与 v1 的 order_event_recorder 同签名同格式，
+    便于 AB 脚本无缝切换后端）。
+
+    格式完全对齐 v1（"用户提到「…」；已建工单 …"）：带 query 前缀是为了
+    让词面/嵌入召回都找得到——用户说"上次那个维修"，摘要里要有"维修"。
+    """
+    prefix = f"用户提到「{query[:30]}」；" if query else ""
+
+    def record(action: str, payload: Dict[str, Any]) -> None:
+        order_id = str(payload.get("预约单号") or "")
+        item = str(payload.get("项目") or "")
+        date = str(payload.get("到店日期") or "")
+        center = str(payload.get("门店") or "")
+        if action == "order_created":
+            text = f"{prefix}已建工单 {order_id}：{item}，{date} 到 {center}"
+        elif action == "order_reused":
+            text = f"{prefix}工单 {order_id} 已存在：{item}，{date} 到 {center}"
+        elif action == "order_rescheduled":
+            text = f"{prefix}工单 {order_id} 改期到 {date}" + (f"（{center}）" if center else "")
+        elif action == "order_cancelled":
+            text = f"{prefix}工单 {order_id} 已取消"
+        else:
+            return
+        pipeline.remember_episode(text, user_id=user_id, session_id=session_id,
+                                  dedupe_key=f"{session_id}:{action}:{order_id}:{date}")
+
+    return record
